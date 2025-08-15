@@ -24,4 +24,4 @@ jobs:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           action: "upload"
           app_location: "apps/web"
-          output_location: ".next"
+          output_location: "out"
