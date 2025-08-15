@@ -7,7 +7,10 @@ export default function AuthButtons() {
 
   const login = () => instance.loginRedirect();
   const logout = () => instance.logoutRedirect();
-
+// apps/web/components/AuthButtons.tsx
+<button className="px-4 py-2 rounded bg-black text-white" onClick={login}>
+  Login / Sign up
+</button>
   return (
     <div>
       {loggedIn ? (
