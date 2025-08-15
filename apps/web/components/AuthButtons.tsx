@@ -5,18 +5,24 @@ export default function AuthButtons() {
   const { instance, accounts } = useMsal();
   const loggedIn = accounts.length > 0;
 
-  const login = () => instance.loginRedirect();
+  const login = async () => {
+    try {
+      await instance.loginRedirect(); // we can add scopes later
+    } catch (e) {
+      // eslint-disable-next-line no-alert
+      alert('Login error: ' + (e as Error).message);
+      // eslint-disable-next-line no-console
+      console.error(e);
+    }
+  };
   const logout = () => instance.logoutRedirect();
-// apps/web/components/AuthButtons.tsx
-<button className="px-4 py-2 rounded bg-black text-white" onClick={login}>
-  Login / Sign up
-</button>
+
   return (
-    <div>
+    <div className="flex gap-3">
       {loggedIn ? (
-        <button onClick={logout}>Logout</button>
+        <button className="px-4 py-2 rounded bg-black text-white" onClick={logout}>Logout</button>
       ) : (
-        <button onClick={login}>Login / Sign up</button>
+        <button className="px-4 py-2 rounded bg-blue-600 text-white" onClick={login}>Login / Sign up</button>
       )}
     </div>
   );
