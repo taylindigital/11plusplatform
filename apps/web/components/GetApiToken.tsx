@@ -1,12 +1,22 @@
 'use client';
-import { useMsal } from '@azure/msal-react';
+
 import { useState } from 'react';
+import { useMsal } from '@azure/msal-react';
 
-const SCOPE = process.env.NEXT_PUBLIC_API_SCOPE!;
+const API_SCOPE = process.env.NEXT_PUBLIC_API_SCOPE || ''; // e.g. "api://<API_CLIENT_ID>/access_as_user"
 
-function decodeJwtPart(part: string) {
+function safeDecodeJwt(token: string): Record<string, unknown> | null {
   try {
-    return JSON.parse(Buffer.from(part.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const json = decodeURIComponent(
+      atob(base64)
+        .split('')
+        .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+        .join('')
+    );
+    return JSON.parse(json) as Record<string, unknown>;
   } catch {
     return null;
   }
@@ -14,26 +24,36 @@ function decodeJwtPart(part: string) {
 
 export default function GetApiToken() {
   const { instance, accounts } = useMsal();
-  const [token, setToken] = useState<string | null>(null);
-  const [claims, setClaims] = useState<any>(null);
-  const loggedIn = accounts.length > 0;
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [claims, setClaims] = useState<Record<string, unknown> | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const getToken = async () => {
-    if (!loggedIn) return alert('Please sign in first.');
-    const account = accounts[0];
+    setError(null);
+    setAccessToken(null);
+    setClaims(null);
+
+    if (!API_SCOPE) {
+      setError('API scope is not configured.');
+      return;
+    }
+    if (!accounts || accounts.length === 0) {
+      setError('Please sign in first.');
+      return;
+    }
+
+    const request = { scopes: [API_SCOPE], account: accounts[0] };
 
     try {
-      // try silent first
-      const silent = await instance.acquireTokenSilent({
-        account,
-        scopes: [SCOPE],
-      });
-      setToken(silent.accessToken);
-      const parts = silent.accessToken.split('.');
-      setClaims(parts.length === 3 ? decodeJwtPart(parts[1]) : null);
-    } catch {
-      // fall back to interactive
-      await instance.acquireTokenRedirect({ scopes: [SCOPE] });
+      // Try silent first
+      const res = await instance.acquireTokenSilent(request);
+      const at = res.accessToken;
+      setAccessToken(at);
+      setClaims(safeDecodeJwt(at));
+    } catch (e) {
+      // If user interaction is required, redirect
+      // (MSAL will return here after auth completes)
+      await instance.acquireTokenRedirect({ scopes: [API_SCOPE] });
     }
   };
 
@@ -42,15 +62,25 @@ export default function GetApiToken() {
       <button className="px-4 py-2 rounded bg-emerald-600 text-white" onClick={getToken}>
         Get API Token
       </button>
-      {token && (
+
+      {error && <p className="text-red-600 mt-2">{error}</p>}
+
+      {claims && (
         <div className="mt-3 text-sm">
-          <div><strong>Access token (aud):</strong> {claims?.aud}</div>
-          <div><strong>Scope:</strong> {claims?.scp}</div>
+          <div><strong>aud:</strong> {String(claims['aud'] ?? '')}</div>
+          <div><strong>scp:</strong> {String(claims['scp'] ?? '')}</div>
           <details className="mt-2">
-            <summary>Show claims</summary>
+            <summary>Show full claims</summary>
             <pre className="text-xs overflow-auto">{JSON.stringify(claims, null, 2)}</pre>
           </details>
         </div>
+      )}
+
+      {accessToken && (
+        <details className="mt-2">
+          <summary>Show raw access token</summary>
+          <pre className="text-xs overflow-auto break-all">{accessToken}</pre>
+        </details>
       )}
     </div>
   );
