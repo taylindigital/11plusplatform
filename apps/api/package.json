@@ -6,6 +6,7 @@
   "engines": { "node": ">=18 <20" },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "migrate": "psql $PGDATABASE --host=$PGHOST --username=$PGUSER --file migrations/001_init.sql",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js"
   },
