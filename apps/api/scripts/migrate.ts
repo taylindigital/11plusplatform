@@ -1,7 +1,13 @@
 import { Pool } from 'pg';
 import { readdirSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { createHash } from 'crypto';
+import { fileURLToPath } from 'url';
+
+// ---- make paths relative to THIS script file, not CWD ----
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const MIGRATIONS_DIR = join(__dirname, '..', 'migrations'); // apps/api/migrations
 
 const {
   PGHOST,
@@ -13,7 +19,6 @@ const {
 } = process.env;
 
 if (!PGHOST || !PGDATABASE || !PGUSER || !PGPASSWORD) {
-  // eslint-disable-next-line no-console
   console.error('Missing PG* env vars. Set PGHOST, PGDATABASE, PGUSER, PGPASSWORD (optional: PGPORT, PGSSLMODE).');
   process.exit(1);
 }
@@ -51,7 +56,6 @@ async function alreadyApplied(name: string, sum: string) {
 }
 
 async function applyMigration(name: string, sql: string, sum: string) {
-  // Run migration in a transaction
   await pool.query('BEGIN');
   try {
     await pool.query(sql);
@@ -60,7 +64,6 @@ async function applyMigration(name: string, sql: string, sum: string) {
       [name, sum]
     );
     await pool.query('COMMIT');
-    // eslint-disable-next-line no-console
     console.log(`✔ Applied ${name}`);
   } catch (e) {
     await pool.query('ROLLBACK');
@@ -69,20 +72,29 @@ async function applyMigration(name: string, sql: string, sum: string) {
 }
 
 async function main() {
-  const dir = join(process.cwd(), 'apps', 'api', 'migrations');
-  const files = readdirSync(dir)
-    .filter(f => f.endsWith('.sql'))
-    .sort(); // run in order e.g. 001_..., 002_...
+  let files: string[];
+  try {
+    files = readdirSync(MIGRATIONS_DIR)
+      .filter(f => f.endsWith('.sql'))
+      .sort();
+  } catch (e) {
+    throw new Error(`Migrations directory not found: ${MIGRATIONS_DIR}`);
+  }
+
+  if (files.length === 0) {
+    console.log('No migration files found.');
+    await pool.end();
+    return;
+  }
 
   await ensureMigrationsTable();
 
   for (const file of files) {
-    const full = join(dir, file);
+    const full = join(MIGRATIONS_DIR, file);
     const sql = readFileSync(full, 'utf8');
     const sum = checksum(sql);
     const done = await alreadyApplied(file, sum);
     if (done) {
-      // eslint-disable-next-line no-console
       console.log(`↷ Skipping ${file} (already applied)`);
       continue;
     }
@@ -93,7 +105,6 @@ async function main() {
 }
 
 main().catch(err => {
-  // eslint-disable-next-line no-console
   console.error(err);
   process.exit(1);
 });
