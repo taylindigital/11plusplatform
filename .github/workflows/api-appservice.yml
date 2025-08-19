@@ -1,0 +1,46 @@
+name: Deploy API to App Service
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'apps/api/**'
+      - '.github/workflows/api-appservice.yml'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: apps/api/package-lock.json
+
+      - name: Install
+        working-directory: apps/api
+        run: npm ci
+
+      - name: Build
+        working-directory: apps/api
+        run: npm run build
+
+      - name: Archive files
+        run: |
+          mkdir -p api-package
+          cp -r apps/api/dist api-package/
+          cp apps/api/package.json api-package/
+          # create a minimal start script for App Service
+          echo '{"type":"module","main":"dist/index.js","engines":{"node":">=18 <20"},"dependencies":{"express":"^4.19.2","jose":"^5.9.3","cors":"^2.8.5","morgan":"^1.10.0"}}' > api-package/package.json
+          (cd api-package && npm install --omit=dev)
+
+          cd api-package && zip -r ../api.zip .
+
+      - name: Deploy to App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: app-11plusplatform-dev-uks   # <-- your App Service name
+          package: api.zip
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_API }}
