@@ -1,0 +1,36 @@
+name: DB Migrate
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'apps/api/migrations/**'
+      - '.github/workflows/db-migrate.yml'
+  workflow_dispatch: {}
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: apps/api/package-lock.json
+
+      - name: Install deps
+        working-directory: apps/api
+        run: npm ci
+
+      - name: Run migrations
+        working-directory: .
+        env:
+          PGHOST: ${{ secrets.PGHOST }}
+          PGPORT: ${{ secrets.PGPORT }}
+          PGDATABASE: ${{ secrets.PGDATABASE }}
+          PGUSER: ${{ secrets.PGUSER }}
+          PGPASSWORD: ${{ secrets.PGPASSWORD }}
+          PGSSLMODE: require
+        run: npm --prefix apps/api run migrate
