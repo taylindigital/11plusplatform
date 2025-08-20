@@ -9,17 +9,32 @@ const app = express();
 
 // ---- config & middleware
 const SWA_ORIGIN = (process.env.SWA_ORIGIN || 'https://nice-ocean-0e8063c03.2.azurestaticapps.net').replace(/\/+$/, '');
-const ALLOWED = new Set([SWA_ORIGIN, 'http://localhost:3000', 'http://127.0.0.1:3000']);
+// We’ll allow the exact SWA origin, localhost (dev), and any *.azurestaticapps.net
+const isAllowedOrigin = (origin: string): boolean => {
+  if (!origin) return false;
+  const norm = origin.replace(/\/+$/, '');
+  if (norm === SWA_ORIGIN) return true;
+  if (norm.startsWith('http://localhost:') || norm.startsWith('http://127.0.0.1:')) return true;
+
+  // cover SWA staging/preview hosts too
+  try {
+    const host = new URL(norm).hostname.toLowerCase();
+    if (host.endsWith('.azurestaticapps.net')) return true;
+  } catch {
+    // ignore bad origins
+  }
+  return false;
+};
 
 app.use(express.json());
 app.use(morgan('tiny'));
 
 // dynamic origin check to avoid subtle string mismatches
 const corsOptions: CorsOptionsDelegate = (req, cb) => {
-  const origin = (req.headers['origin'] || '').toString().replace(/\/+$/, '');
-  const isAllowed = ALLOWED.has(origin);
+  const origin = (req.headers['origin'] || '').toString();
+  const allowed = isAllowedOrigin(origin);
   cb(null, {
-    origin: isAllowed,
+    origin: allowed ? origin : false,
     credentials: false,
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Authorization', 'Content-Type'],
@@ -29,7 +44,20 @@ const corsOptions: CorsOptionsDelegate = (req, cb) => {
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions))
-
+// (optional) add Vary for proper caching behavior
+app.use((_, res, next) => {
+  res.setHeader('Vary', 'Origin');
+  next();
+});
+// ---- debug CORS endpoint
+app.get('/debug/cors', (req, res) => {
+  const origin = (req.headers['origin'] || '').toString();
+  res.json({
+    origin,
+    SWA_ORIGIN,
+    allowed: isAllowedOrigin(origin),
+  });
+});
 // ---- health endpoints
 app.get('/health', (_req: Request, res: Response) => res.json({ ok: true }));
 
