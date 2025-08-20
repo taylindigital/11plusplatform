@@ -1,0 +1,57 @@
+name: Deploy API to App Service (artifact)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'apps/api/**'
+      - '.github/workflows/api-deploy.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: api-deploy
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      APP_NAME: app-11plusplatform-dev-uks
+      API_DIR: apps/api
+      ARTIFACT: api.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: ${{ env.API_DIR }}/package-lock.json
+
+      - name: Install prod deps
+        working-directory: ${{ env.API_DIR }}
+        run: npm ci --omit=dev
+
+      - name: Build
+        working-directory: ${{ env.API_DIR }}
+        run: npm run build
+
+      - name: Create deploy zip (dist + package files + node_modules)
+        working-directory: ${{ env.API_DIR }}
+        run: |
+          rm -f ../${{ env.ARTIFACT }}
+          zip -r ../${{ env.ARTIFACT }} \
+            dist \
+            package.json \
+            package-lock.json \
+            node_modules
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.APP_NAME }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_API }}
+          package: ${{ env.API_DIR }}/../${{ env.ARTIFACT }}
