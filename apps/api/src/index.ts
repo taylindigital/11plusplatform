@@ -1,5 +1,5 @@
 import express, { type Request, type Response } from 'express';
-import cors from 'cors';
+import cors, { CorsOptionsDelegate } from 'cors';
 import morgan from 'morgan';
 import { verifyBearer, type AuthenticatedRequest } from './auth.js';
 import { q } from './db.js';
@@ -8,12 +8,27 @@ import { q } from './db.js';
 const app = express();
 
 // ---- config & middleware
-const SWA_ORIGIN =
-  process.env.SWA_ORIGIN || 'https://nice-ocean-0e8063c03.2.azurestaticapps.net';
-app.use(cors({ origin: [SWA_ORIGIN], credentials: false }));
+const SWA_ORIGIN = (process.env.SWA_ORIGIN || 'https://nice-ocean-0e8063c03.2.azurestaticapps.net').replace(/\/+$/, '');
+const ALLOWED = new Set([SWA_ORIGIN, 'http://localhost:3000', 'http://127.0.0.1:3000']);
 
 app.use(express.json());
 app.use(morgan('tiny'));
+
+// dynamic origin check to avoid subtle string mismatches
+const corsOptions: CorsOptionsDelegate = (req, cb) => {
+  const origin = (req.header('Origin') || '').replace(/\/+$/, '');
+  const isAllowed = ALLOWED.has(origin);
+  cb(null, {
+    origin: isAllowed,
+    credentials: false,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type'],
+    maxAge: 600,
+  });
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions))
 
 // ---- health endpoints
 app.get('/health', (_req: Request, res: Response) => res.json({ ok: true }));
