@@ -41,7 +41,14 @@ app.get('/api/ping', verifyBearer, (req: AuthenticatedRequest, res: Response) =>
 app.post('/api/users/init', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
   const sub = req.auth?.sub;
   const email = (req.auth?.preferred_username as string) || '';
-  const name = (req.auth?.name as string) || '';
+  const given = (req.auth as any)?.given_name as string | undefined;
+  const family = (req.auth as any)?.family_name as string | undefined;
+  const fullFromParts = [given, family].filter(Boolean).join(' ').trim();
+  const name =
+    (req.auth?.name as string) ||
+    fullFromParts ||
+    email.split('@')[0]; // last-resort: local part of email
+
   if (!sub || !email) return res.status(400).json({ error: 'missing_claims' });
 
   await q(
@@ -64,16 +71,6 @@ app.post('/api/users/init', verifyBearer, async (req: AuthenticatedRequest, res:
 
   const [me] = await q<{ status: string }>(`select status from app_user where subject=$1`, [sub]);
   res.json({ ok: true, status: me?.status || 'pending' });
-});
-
-app.get('/api/users/me', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
-  const sub = req.auth?.sub;
-  const rows = await q(
-    `select subject, email, display_name, status from app_user where subject=$1`,
-    [sub],
-  );
-  if (!rows.length) return res.status(404).json({ error: 'not_found' });
-  res.json(rows[0]);
 });
 
 // ---- admin approve/reject (email guard for now)
