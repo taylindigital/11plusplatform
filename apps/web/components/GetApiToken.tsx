@@ -50,8 +50,9 @@ export default function GetApiToken() {
       const at = res.accessToken;
       setAccessToken(at);
       setClaims(safeDecodeJwt(at));
-    } catch (_e) {
-      // If user interaction is required, redirect
+    } catch {
+      setError('Failed to get token');
+    }      // If user interaction is required, redirect
       // (MSAL will return here after auth completes)
       await instance.acquireTokenRedirect({ scopes: [API_SCOPE] });
     }

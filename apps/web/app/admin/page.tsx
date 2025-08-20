@@ -13,18 +13,20 @@ type UserRow = {
   updated_at: string;
 };
 
+type Filter = 'pending' | 'approved' | 'rejected' | 'all';
+
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? 'https://app-11plusplatform-dev-uks.azurewebsites.net';
-const API_SCOPE = process.env.NEXT_PUBLIC_API_SCOPE!; // already set in your SWA
+const API_SCOPE = process.env.NEXT_PUBLIC_API_SCOPE!;
 
 export default function AdminPage() {
   const { instance, accounts } = useMsal();
   const [users, setUsers] = useState<UserRow[]>([]);
-  const [filter, setFilter] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
+  const [filter, setFilter] = useState<Filter>('pending');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function getToken() {
+  async function getToken(): Promise<string> {
     const account = accounts[0];
     if (!account) throw new Error('No signed-in account');
     try {
@@ -40,11 +42,12 @@ export default function AdminPage() {
           scopes: [API_SCOPE],
         });
       }
+      // This line will only run on non-redirectable errors
       throw e;
     }
   }
 
-  async function loadUsers() {
+  async function loadUsers(): Promise<void> {
     setLoading(true);
     setError(null);
     try {
@@ -53,33 +56,66 @@ export default function AdminPage() {
       const resp = await fetch(`${API_BASE}/api/admin/users${qs}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error((data && (data.error || data.message)) || 'Failed to load users');
 
-      // Accept either the raw array or { ok, users: [...] }
-      const list: UserRow[] = Array.isArray(data) ? data : data.users || [];
+      // parse json defensively
+      const data: unknown = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const msg =
+          (typeof data === 'object' &&
+            data !== null &&
+            'error' in data &&
+            typeof (data as { error?: unknown }).error === 'string' &&
+            (data as { error: string }).error) || 'Failed to load users';
+        throw new Error(msg);
+      }
+
+      // accept either array or { ok, users }
+      const list: UserRow[] = Array.isArray(data)
+        ? (data as UserRow[])
+        : (typeof data === 'object' &&
+            data !== null &&
+            'users' in data &&
+            Array.isArray((data as { users?: unknown }).users)
+          ? ((data as { users: UserRow[] }).users)
+          : []);
+
       setUsers(list);
-    } catch (err: any) {
-      setError(err?.message || 'Error loading users');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
     } finally {
       setLoading(false);
     }
   }
 
-  async function changeStatus(subject: string, action: 'approve' | 'reject') {
+  async function changeStatus(subject: string, action: 'approve' | 'reject'): Promise<void> {
     setLoading(true);
     setError(null);
     try {
       const token = await getToken();
-      const resp = await fetch(`${API_BASE}/api/admin/users/${encodeURIComponent(subject)}/${action}`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error((data && (data.error || data.message)) || 'Failed to update');
+      const resp = await fetch(
+        `${API_BASE}/api/admin/users/${encodeURIComponent(subject)}/${action}`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      const data: unknown = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const msg =
+          (typeof data === 'object' &&
+            data !== null &&
+            'error' in data &&
+            typeof (data as { error?: unknown }).error === 'string' &&
+            (data as { error: string }).error) || 'Failed to update';
+        throw new Error(msg);
+      }
+
       await loadUsers();
-    } catch (err: any) {
-      setError(err?.message || 'Error updating user');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
       setLoading(false);
     }
   }
@@ -98,7 +134,9 @@ export default function AdminPage() {
         <select
           className="border rounded px-2 py-1 text-sm"
           value={filter}
-          onChange={(e) => setFilter(e.target.value as any)}
+          onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+            setFilter(e.target.value as Filter)
+          }
         >
           <option value="pending">Pending</option>
           <option value="approved">Approved</option>
@@ -108,7 +146,7 @@ export default function AdminPage() {
 
         <button
           className="ml-auto border rounded px-3 py-1 text-sm"
-          onClick={() => loadUsers()}
+          onClick={() => void loadUsers()}
           disabled={loading}
         >
           Refresh
@@ -137,14 +175,14 @@ export default function AdminPage() {
                 <button
                   className="mr-2 border rounded px-2 py-1"
                   disabled={u.status === 'approved' || loading}
-                  onClick={() => changeStatus(u.subject, 'approve')}
+                  onClick={() => void changeStatus(u.subject, 'approve')}
                 >
                   Approve
                 </button>
                 <button
                   className="border rounded px-2 py-1"
                   disabled={u.status === 'rejected' || loading}
-                  onClick={() => changeStatus(u.subject, 'reject')}
+                  onClick={() => void changeStatus(u.subject, 'reject')}
                 >
                   Reject
                 </button>
