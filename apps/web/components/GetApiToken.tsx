@@ -3,9 +3,23 @@
 import { useState } from 'react';
 import { useMsal } from '@azure/msal-react';
 import { InteractionRequiredAuthError } from '@azure/msal-browser';
-import { decodeJwt } from 'jose';
 
 const API_SCOPE = process.env.NEXT_PUBLIC_API_SCOPE!;
+
+// Minimal JWT payload decoder (browser-safe)
+function decodeJwtPayload(token: string): Record<string, unknown> {
+  const parts = token.split('.');
+  if (parts.length < 2) return {};
+  let payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+  // pad to multiple of 4
+  while (payload.length % 4) payload += '=';
+  try {
+    const json = atob(payload);
+    return JSON.parse(json) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
 
 export default function GetApiToken() {
   const { instance, accounts } = useMsal();
@@ -29,13 +43,10 @@ export default function GetApiToken() {
         scopes: [API_SCOPE],
       });
       setAccessToken(at);
-      setClaims(decodeJwt(at));
+      setClaims(decodeJwtPayload(at));
     } catch (e) {
       if (e instanceof InteractionRequiredAuthError) {
-        await instance.acquireTokenRedirect({
-          account,
-          scopes: [API_SCOPE],
-        });
+        await instance.acquireTokenRedirect({ account, scopes: [API_SCOPE] });
         return;
       }
       const msg = e instanceof Error ? e.message : String(e);
