@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useMsal } from '@azure/msal-react';
 import { useIsAdmin } from '@/lib/useIsAdmin';
 
@@ -24,7 +24,7 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const fetchUsers = async () => {
+  const fetchUsers = useCallback(async () => {
     if (!isAdmin || !accounts.length) return;
     setLoading(true); setErr(null);
     try {
@@ -44,9 +44,9 @@ export default function AdminPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [isAdmin, accounts, instance, statusFilter]);
 
-  const act = async (subject: string, action: 'approve'|'reject') => {
+  const act = useCallback(async (subject: string, action: 'approve'|'reject') => {
     setErr(null);
     try {
       const { accessToken } = await instance.acquireTokenSilent({
@@ -62,9 +62,9 @@ export default function AdminPage() {
     } catch (e) {
       setErr((e as Error).message);
     }
-  };
+  }, [accounts, instance, fetchUsers]);
 
-  useEffect(() => { void fetchUsers(); }, [isAdmin, accounts, statusFilter]); // refresh on filter/admin change
+  useEffect(() => { void fetchUsers(); }, [fetchUsers]);
 
   const title = useMemo(
     () => (statusFilter === 'all' ? 'All users' : `Users: ${statusFilter}`),
@@ -89,17 +89,16 @@ export default function AdminPage() {
           <select
             className="border rounded px-2 py-1"
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as any)}
+            onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+              setStatusFilter(e.target.value as typeof statusFilter)
+            }
           >
             <option value="pending">pending</option>
             <option value="approved">approved</option>
             <option value="rejected">rejected</option>
             <option value="all">all</option>
           </select>
-          <button
-            className="px-3 py-1 rounded border"
-            onClick={() => void fetchUsers()}
-          >
+          <button className="px-3 py-1 rounded border" onClick={() => void fetchUsers()}>
             Refresh
           </button>
         </div>
