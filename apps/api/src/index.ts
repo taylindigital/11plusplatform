@@ -157,6 +157,36 @@ app.use((_req: Request, res: Response) => res.status(404).json({ error: 'not_fou
 
 // ---- start
 const port = +(process.env.PORT || 8080);
+// --- last middleware: global error handler that still adds CORS headers
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+app.use((err: unknown, req: Request, res: Response, _next: Function) => {
+  // Log for diagnostics
+  // eslint-disable-next-line no-console
+  console.error('ERROR:', err);
+
+  // If we haven't sent headers yet, make sure CORS headers are present
+  if (!res.headersSent) {
+    const origin = String(req.headers.origin || '');
+    res.setHeader('Vary', 'Origin');
+    // Use the same allow logic as your CORS middleware
+    const isAllowed =
+      origin === SWA_ORIGIN ||
+      /^http:\/\/(localhost|127\.0\.0\.1):\d+$/i.test(origin) ||
+      (() => {
+        try { return new URL(origin).hostname.toLowerCase().endsWith('.azurestaticapps.net'); }
+        catch { return false; }
+      })();
+
+    if (isAllowed) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    }
+  }
+
+  const status = (err as { status?: number }).status ?? 500;
+  res.status(status).json({ error: 'server_error' });
+});
 app.listen(port, () => {
   // eslint-disable-next-line no-console
   console.log(`API listening on :${port}`);
