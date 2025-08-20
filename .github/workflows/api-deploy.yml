@@ -59,6 +59,14 @@ jobs:
             package-lock.json \
             node_modules
 
+      - name: Show packaged package.json
+        working-directory: ${{ env.API_DIR }}
+        run: unzip -p ../${{ env.ARTIFACT }} package.json
+
+      - name: List ZIP contents (top)
+        working-directory: ${{ env.API_DIR }}
+        run: unzip -l ../${{ env.ARTIFACT }} | sed -n '1,200p'        
+
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
