@@ -114,7 +114,8 @@ app.get('/api/admin/users', verifyBearer, async (req: AuthenticatedRequest, res:
          from app_user
          order by created_at desc limit 200`,
       );
-  res.json(rows);
+
+  res.json({ ok: true, users: rows }); // ← wrap here
 });
 
 // ---- 404

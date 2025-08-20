@@ -1,14 +1,11 @@
 'use client';
 
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState } from 'react';
 import { useMsal } from '@azure/msal-react';
-import { useIsAdmin } from '@/lib/useIsAdmin';
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE!;
-const API_SCOPE = process.env.NEXT_PUBLIC_API_SCOPE!;
+import { InteractionRequiredAuthError } from '@azure/msal-browser';
 
 type UserRow = {
-  subject: string;
+  id: string;
   email: string;
   display_name: string | null;
   status: 'pending' | 'approved' | 'rejected';
@@ -16,142 +13,150 @@ type UserRow = {
   updated_at: string;
 };
 
-export default function AdminPage() {
-  const isAdmin = useIsAdmin();
-  const { instance, accounts } = useMsal();
-  const [statusFilter, setStatusFilter] = useState<'all'|'pending'|'approved'|'rejected'>('pending');
-  const [rows, setRows] = useState<UserRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'https://app-11plusplatform-dev-uks.azurewebsites.net';
 
-  const fetchUsers = useCallback(async () => {
-    if (!isAdmin || !accounts.length) return;
-    setLoading(true); setErr(null);
+export default function AdminPage() {
+  const { instance, accounts } = useMsal();
+  const [users, setUsers] = useState<UserRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [filter, setFilter] = useState<'all'|'pending'|'approved'|'rejected'>('pending');
+  const [error, setError] = useState<string | null>(null);
+
+  async function getToken() {
+    const account = accounts[0];
+    if (!account) throw new Error('No account');
     try {
-      const { accessToken } = await instance.acquireTokenSilent({
-        account: accounts[0],
-        scopes: [API_SCOPE],
+      const res = await instance.acquireTokenSilent({
+        account,
+        scopes: [process.env.NEXT_PUBLIC_API_SCOPE!],
       });
-      const qs = statusFilter === 'all' ? '' : `?status=${encodeURIComponent(statusFilter)}`;
-      const r = await fetch(`${API_BASE}/api/admin/users${qs}`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-      if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-      const data = (await r.json()) as UserRow[];
-      setRows(data);
+      return res.accessToken;
     } catch (e) {
-      setErr((e as Error).message);
+      if (e instanceof InteractionRequiredAuthError) {
+        const res = await instance.acquireTokenRedirect({
+          account,
+          scopes: [process.env.NEXT_PUBLIC_API_SCOPE!],
+        });
+        return res.accessToken;
+      }
+      throw e;
+    }
+  }
+
+  async function loadUsers() {
+    setLoading(true);
+    setError(null);
+    try {
+      const token = await getToken();
+      const qs = filter === 'all' ? '' : `?status=${filter}`;
+      const resp = await fetch(`${API_BASE}/admin/users${qs}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.error || 'Failed to load');
+      setUsers(data.users);
+    } catch (e: any) {
+      setError(e.message || 'Error');
     } finally {
       setLoading(false);
     }
-  }, [isAdmin, accounts, instance, statusFilter]);
-
-  const act = useCallback(async (subject: string, action: 'approve'|'reject') => {
-    setErr(null);
-    try {
-      const { accessToken } = await instance.acquireTokenSilent({
-        account: accounts[0],
-        scopes: [API_SCOPE],
-      });
-      const r = await fetch(`${API_BASE}/api/admin/users/${encodeURIComponent(subject)}/${action}`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-      if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-      await fetchUsers();
-    } catch (e) {
-      setErr((e as Error).message);
-    }
-  }, [accounts, instance, fetchUsers]);
-
-  useEffect(() => { void fetchUsers(); }, [fetchUsers]);
-
-  const title = useMemo(
-    () => (statusFilter === 'all' ? 'All users' : `Users: ${statusFilter}`),
-    [statusFilter]
-  );
-
-  if (!isAdmin) {
-    return (
-      <div className="max-w-3xl mx-auto mt-10 p-6 border rounded">
-        <h1 className="text-xl font-semibold mb-2">Admin</h1>
-        <p className="text-sm text-gray-600">You don’t have access to this page.</p>
-      </div>
-    );
   }
 
+  async function mutate(id: string, action: 'approve'|'reject') {
+    setLoading(true);
+    setError(null);
+    try {
+      const token = await getToken();
+      const resp = await fetch(`${API_BASE}/admin/users/${id}/${action}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) {
+        const d = await resp.json().catch(() => ({}));
+        throw new Error(d?.error || 'Failed action');
+      }
+      await loadUsers();
+    } catch (e: any) {
+      setError(e.message || 'Error');
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter]);
+
   return (
-    <div className="max-w-5xl mx-auto mt-8 p-4">
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-semibold">{title}</h1>
-        <div className="flex items-center gap-2">
-          <label className="text-sm">Filter:</label>
-          <select
-            className="border rounded px-2 py-1"
-            value={statusFilter}
-            onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-              setStatusFilter(e.target.value as typeof statusFilter)
-            }
-          >
-            <option value="pending">pending</option>
-            <option value="approved">approved</option>
-            <option value="rejected">rejected</option>
-            <option value="all">all</option>
-          </select>
-          <button className="px-3 py-1 rounded border" onClick={() => void fetchUsers()}>
-            Refresh
-          </button>
-        </div>
+    <main className="max-w-3xl mx-auto p-6">
+      <h1 className="text-2xl font-semibold mb-4">Admin — User approvals</h1>
+
+      <div className="flex items-center gap-2 mb-4">
+        <label className="text-sm">Filter:</label>
+        <select
+          className="border rounded px-2 py-1 text-sm"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value as any)}
+        >
+          <option value="pending">Pending</option>
+          <option value="approved">Approved</option>
+          <option value="rejected">Rejected</option>
+          <option value="all">All</option>
+        </select>
+        <button
+          className="ml-auto border rounded px-3 py-1 text-sm"
+          onClick={() => loadUsers()}
+          disabled={loading}
+        >
+          Refresh
+        </button>
       </div>
 
-      {err && <div className="mb-3 text-red-600 text-sm">Error: {err}</div>}
-      {loading && <div className="text-gray-500 text-sm">Loading…</div>}
+      {error && <p className="text-red-600 text-sm mb-2">Error: {error}</p>}
+      {loading && <p className="text-sm">Loading…</p>}
 
-      {!loading && rows.length === 0 && (
-        <p className="text-gray-600 text-sm">No users found.</p>
-      )}
-
-      {rows.length > 0 && (
-        <div className="overflow-x-auto border rounded">
-          <table className="min-w-full text-sm">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="text-left px-3 py-2">email</th>
-                <th className="text-left px-3 py-2">name</th>
-                <th className="text-left px-3 py-2">status</th>
-                <th className="text-left px-3 py-2">created</th>
-                <th className="text-left px-3 py-2">updated</th>
-                <th className="text-left px-3 py-2">actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((u) => (
-                <tr key={u.subject} className="border-t">
-                  <td className="px-3 py-2">{u.email}</td>
-                  <td className="px-3 py-2">{u.display_name || '-'}</td>
-                  <td className="px-3 py-2">{u.status}</td>
-                  <td className="px-3 py-2">{new Date(u.created_at).toLocaleString()}</td>
-                  <td className="px-3 py-2">{new Date(u.updated_at).toLocaleString()}</td>
-                  <td className="px-3 py-2">
-                    <div className="flex gap-2">
-                      <button
-                        className="px-2 py-1 rounded bg-emerald-600 text-white disabled:opacity-50"
-                        disabled={u.status === 'approved'}
-                        onClick={() => void act(u.subject, 'approve')}
-                      >Approve</button>
-                      <button
-                        className="px-2 py-1 rounded bg-rose-600 text-white disabled:opacity-50"
-                        disabled={u.status === 'rejected'}
-                        onClick={() => void act(u.subject, 'reject')}
-                      >Reject</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
+      <table className="w-full text-sm border">
+        <thead>
+          <tr className="bg-gray-50">
+            <th className="p-2 text-left">Email</th>
+            <th className="p-2 text-left">Name</th>
+            <th className="p-2 text-left">Status</th>
+            <th className="p-2 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {users.map((u) => (
+            <tr key={u.id} className="border-t">
+              <td className="p-2">{u.email}</td>
+              <td className="p-2">{u.display_name ?? '—'}</td>
+              <td className="p-2">{u.status}</td>
+              <td className="p-2 text-right">
+                <button
+                  className="mr-2 border rounded px-2 py-1"
+                  disabled={u.status === 'approved' || loading}
+                  onClick={() => mutate(u.id, 'approve')}
+                >
+                  Approve
+                </button>
+                <button
+                  className="border rounded px-2 py-1"
+                  disabled={u.status === 'rejected' || loading}
+                  onClick={() => mutate(u.id, 'reject')}
+                >
+                  Reject
+                </button>
+              </td>
+            </tr>
+          ))}
+          {users.length === 0 && !loading && (
+            <tr>
+              <td className="p-4 text-center text-gray-500" colSpan={4}>
+                No users for this filter.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </main>
   );
 }
