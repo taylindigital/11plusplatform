@@ -31,14 +31,24 @@ jobs:
           cache: 'npm'
           cache-dependency-path: ${{ env.API_DIR }}/package-lock.json
 
-      - name: Install prod deps
+      # 1) Install WITH dev deps so tsc has types
+      - name: Install deps (with dev)
         working-directory: ${{ env.API_DIR }}
-        run: npm ci --omit=dev
+        run: npm ci
 
-      - name: Build
+      # 2) Build now (uses dev deps like typescript/@types/node)
+      - name: Build (tsc)
         working-directory: ${{ env.API_DIR }}
         run: npm run build
 
+      # 3) Replace node_modules with PROD-only to slim the package
+      - name: Install prod-only deps
+        working-directory: ${{ env.API_DIR }}
+        run: |
+          rm -rf node_modules
+          npm ci --omit=dev
+
+      # 4) Create ZIP including dist + runtime deps
       - name: Create deploy zip (dist + package files + node_modules)
         working-directory: ${{ env.API_DIR }}
         run: |
