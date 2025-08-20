@@ -39,21 +39,12 @@ const corsOptions: CorsOptionsDelegate = (req, cb) => {
   });
 };
 
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions))
-// (optional) add Vary for proper caching behavior
-app.use((_, res, next) => {
-  res.setHeader('Vary', 'Origin');
-  next();
-});
+app.use(cors({ origin: true, methods: ['GET','POST','OPTIONS'], allowedHeaders: ['Authorization','Content-Type'] }));
+app.options('*', cors({ origin: true }));
 // ---- debug CORS endpoint
 app.get('/debug/cors', (req, res) => {
   const origin = (req.headers['origin'] || '').toString();
-  res.json({
-    origin,
-    SWA_ORIGIN,
-    allowed: isAllowedOrigin(origin),
-  });
+  res.json({ origin, SWA_ORIGIN, allowed: isAllowedOrigin(origin) });
 });
 
 app.use(express.json());
