@@ -16,7 +16,7 @@ app.use(morgan('tiny'));
 
 // dynamic origin check to avoid subtle string mismatches
 const corsOptions: CorsOptionsDelegate = (req, cb) => {
-  const origin = (req.header('Origin') || '').replace(/\/+$/, '');
+  const origin = (req.headers['origin'] || '').toString().replace(/\/+$/, '');
   const isAllowed = ALLOWED.has(origin);
   cb(null, {
     origin: isAllowed,
