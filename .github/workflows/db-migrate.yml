@@ -5,12 +5,19 @@ on:
     branches: [ main ]
     paths:
       - 'apps/api/migrations/**'
+      - 'apps/api/scripts/migrate.ts'
       - '.github/workflows/db-migrate.yml'
   workflow_dispatch: {}
 
 jobs:
   migrate:
     runs-on: ubuntu-latest
+
+    env:
+      RG: rg-11plusplatform-dev-uks
+      PG_SERVER: psql11plusdevuks   # flexible server name (no FQDN)
+      SUBSCRIPTION_ID: db8cb60c-f4b4-4e84-b915-cbcd3e09f5ff
+
     steps:
       - uses: actions/checkout@v4
 
@@ -20,9 +27,31 @@ jobs:
           cache: 'npm'
           cache-dependency-path: apps/api/package-lock.json
 
-      - name: Install deps
+      - name: Install API deps
         working-directory: apps/api
         run: npm ci
+
+      # Login to Azure so we can add/remove firewall rules
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set subscription
+        run: az account set --subscription "$SUBSCRIPTION_ID"
+
+      - name: Detect runner public IP
+        id: ip
+        run: echo "ip=$(curl -s https://api.ipify.org)" >> $GITHUB_OUTPUT
+
+      - name: Add temporary firewall rule
+        run: |
+          az postgres flexible-server firewall-rule create \
+            --resource-group "$RG" \
+            --name "$PG_SERVER" \
+            --rule-name "gha-${{ github.run_id }}" \
+            --start-ip-address "${{ steps.ip.outputs.ip }}" \
+            --end-ip-address "${{ steps.ip.outputs.ip }}"
 
       - name: Run migrations
         working-directory: .
@@ -34,3 +63,12 @@ jobs:
           PGPASSWORD: ${{ secrets.PGPASSWORD }}
           PGSSLMODE: require
         run: npm --prefix apps/api run migrate
+
+      - name: Remove temporary firewall rule (always)
+        if: always()
+        run: |
+          az postgres flexible-server firewall-rule delete \
+            --resource-group "$RG" \
+            --name "$PG_SERVER" \
+            --rule-name "gha-${{ github.run_id }}" \
+            --yes
