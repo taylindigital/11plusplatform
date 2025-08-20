@@ -26,9 +26,6 @@ const isAllowedOrigin = (origin: string): boolean => {
   return false;
 };
 
-app.use(express.json());
-app.use(morgan('tiny'));
-
 // dynamic origin check to avoid subtle string mismatches
 const corsOptions: CorsOptionsDelegate = (req, cb) => {
   const origin = (req.headers['origin'] || '').toString();
@@ -58,6 +55,9 @@ app.get('/debug/cors', (req, res) => {
     allowed: isAllowedOrigin(origin),
   });
 });
+
+app.use(express.json());
+app.use(morgan('tiny'));
 // ---- health endpoints
 app.get('/health', (_req: Request, res: Response) => res.json({ ok: true }));
 
