@@ -99,6 +99,27 @@ app.post('/api/admin/users/:subject/reject', verifyBearer, async (req: Authentic
   res.json({ ok: true });
 });
 
+// Admin: list users (optionally filter by status)
+app.get('/api/admin/users', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
+  if ((req.auth?.preferred_username || '').toLowerCase() !== ADMIN_EMAIL) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  const status = (req.query.status as string) || '';
+  const rows = status
+    ? await q(
+        `select subject, email, display_name, status, created_at, updated_at
+         from app_user where status = $1
+         order by created_at desc limit 200`,
+        [status],
+      )
+    : await q(
+        `select subject, email, display_name, status, created_at, updated_at
+         from app_user
+         order by created_at desc limit 200`,
+      );
+  res.json(rows);
+});
+
 // ---- 404
 app.use((_req: Request, res: Response) => res.status(404).json({ error: 'not_found' }));
 
