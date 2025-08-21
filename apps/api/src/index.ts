@@ -197,6 +197,24 @@ app.get('/debug/auth', verifyBearer, (req: AuthenticatedRequest, res: Response) 
   });
 });
 
+// --- DEBUG: show what the API sees
+app.get('/debug/env', (_req: Request, res: Response) => {
+  res.json({
+    ADMIN_EMAIL: (process.env.ADMIN_EMAIL || '').toLowerCase(),
+    SWA_ORIGIN: process.env.SWA_ORIGIN || '',
+  });
+});
+
+app.get('/debug/whoami', verifyBearer, (req: AuthenticatedRequest, res: Response) => {
+  res.json({
+    preferred_username: req.auth?.preferred_username || null,
+    sub: req.auth?.sub || null,
+    scope: req.auth?.scp || null,
+    iss: req.auth?.iss || null,
+    aud: req.auth?.aud || null,
+  });
+});
+
 // --- who am I / current status
 app.get('/api/users/me', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
   const sub = req.auth?.sub || '';
