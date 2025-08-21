@@ -25,12 +25,10 @@ const AuthContext = createContext<AuthCtx>({
 });
 
 function buildAuthority(tenantId: string, userFlow: string, domain: string) {
-  // Example: https://11plusdevuks.ciamlogin.com/{tenant}/{policy}/v2.0
   return `https://${domain}/${tenantId}/${userFlow}/v2.0`;
 }
 
 function buildMetadataUrl(tenantId: string, userFlow: string, domain: string) {
-  // Example: https://11plusdevuks.ciamlogin.com/{tenant}/v2.0/.well-known/openid-configuration?p=SignUpSignIn
   return `https://${domain}/${tenantId}/v2.0/.well-known/openid-configuration?p=${userFlow}`;
 }
 
@@ -68,12 +66,11 @@ export default function Providers({ children }: { children: ReactNode }) {
     const init = async () => {
       let authorityMetadata: string | undefined;
 
-      // Preload authority metadata to avoid CORS / resolution flakiness.
       try {
         const res = await fetch(cfgPieces.metadataUrl, { cache: 'no-store', mode: 'cors' });
         if (res.ok) authorityMetadata = await res.text();
       } catch {
-        // ignore; MSAL will fetch on its own as a fallback
+        // ignore; MSAL will try itself if needed
       }
 
       const config: Configuration = {
@@ -88,7 +85,6 @@ export default function Providers({ children }: { children: ReactNode }) {
         cache: { cacheLocation: 'localStorage' },
       };
 
-      // Debug surface
       window.__lastMsalCfg = {
         authority: config.auth.authority,
         metadataUrl: cfgPieces.metadataUrl,
@@ -101,12 +97,11 @@ export default function Providers({ children }: { children: ReactNode }) {
       const instance = new PublicClientApplication(config);
       await instance.initialize();
 
-      // Handle possible redirect response
       try {
         const result = await instance.handleRedirectPromise();
         if (result?.account) setAccount(result.account);
       } catch {
-        // swallow to avoid breaking the page on startup
+        // swallow
       }
 
       const accs = instance.getAllAccounts();
@@ -128,7 +123,8 @@ export default function Providers({ children }: { children: ReactNode }) {
   const login = async () => {
     if (!msal) return;
     const req: RedirectRequest = {
-      // Scope can be empty for login; we’ll just create a session.
+      // Minimal scope for sign-in; we’ll request API scopes later when needed
+      scopes: ['openid'],
       redirectUri: cfgPieces.redirectUri,
     };
     await msal.loginRedirect(req);
