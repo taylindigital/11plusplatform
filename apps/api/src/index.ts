@@ -4,7 +4,7 @@ import morgan from 'morgan';
 import { verifyBearer, type AuthenticatedRequest } from './auth.js';
 import { q } from './db.js';
 
-// ---- create app FIRST - 20250821-09:19am version
+// ---- create app FIRST - 20250821-09:32am version
 const app = express();
 
 // ---- config & middleware
@@ -103,6 +103,12 @@ app.post('/api/users/init', verifyBearer, async (req: AuthenticatedRequest, res:
 
 app.get('/api/users/me', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
   const sub = req.auth?.sub;
+  const email =
+  (req.auth?.preferred_username as string) ||
+  ((req.auth as Record<string, unknown>)?.['emails'] as string[] | undefined)?.[0] ||
+  '';
+  const given = (req.auth as Record<string, unknown>)?.['given_name'] as string | undefined;  
+  const family = (req.auth as Record<string, unknown>)?.['family_name'] as string | undefined;
   if (!sub) return res.status(401).json({ error: 'missing_claims' });
   const rows = await q<{ subject: string; email: string; display_name: string; status: string }>(
     `select subject, email, display_name, status from app_user where subject=$1`,
@@ -116,9 +122,13 @@ app.get('/api/users/me', verifyBearer, async (req: AuthenticatedRequest, res: Re
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').toLowerCase();
 
 app.post('/api/admin/users/:subject/approve', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
-  if ((req.auth?.preferred_username || '').toLowerCase() !== ADMIN_EMAIL) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
+const actorEmail =
+  (req.auth?.preferred_username || '').toLowerCase() ||
+  ((((req.auth as any)?.emails?.[0] as string) || '').toLowerCase());
+
+if (actorEmail !== ADMIN_EMAIL) {
+  return res.status(403).json({ error: 'forbidden' });
+}
   const subject = req.params.subject;
   await q(`update app_user set status='approved', updated_at=now() where subject=$1`, [subject]);
   await q(`insert into app_user_audit (subject, action, actor) values ($1,'approved',$2)`, [subject, ADMIN_EMAIL]);
@@ -126,9 +136,13 @@ app.post('/api/admin/users/:subject/approve', verifyBearer, async (req: Authenti
 });
 
 app.post('/api/admin/users/:subject/reject', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
-  if ((req.auth?.preferred_username || '').toLowerCase() !== ADMIN_EMAIL) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
+const actorEmail =
+  (req.auth?.preferred_username || '').toLowerCase() ||
+  ((((req.auth as any)?.emails?.[0] as string) || '').toLowerCase());
+
+if (actorEmail !== ADMIN_EMAIL) {
+  return res.status(403).json({ error: 'forbidden' });
+}
   const subject = req.params.subject;
   await q(`update app_user set status='rejected', updated_at=now() where subject=$1`, [subject]);
   await q(`insert into app_user_audit (subject, action, actor) values ($1,'rejected',$2)`, [subject, ADMIN_EMAIL]);
@@ -177,6 +191,18 @@ app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
 
   const status = (err as { status?: number }).status ?? 500;
   res.status(status).json({ error: 'server_error' });
+});
+
+app.get('/api/whoami', verifyBearer, (req: AuthenticatedRequest, res: Response) => {
+  res.json({
+    sub: req.auth?.sub,
+    preferred_username: req.auth?.preferred_username,
+    emails: (req.auth as any)?.emails,
+    name: req.auth?.name,
+    scp: req.auth?.scp,
+    iss: (req.auth as any)?.iss,
+    aud: (req.auth as any)?.aud,
+  });
 });
 
 // ---- start
