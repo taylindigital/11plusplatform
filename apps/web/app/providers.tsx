@@ -75,7 +75,18 @@ export default function Providers({ children }: { children: React.ReactNode }) {
     const base = baseConfig();
     const auth = authorityMetadata ? { ...base.auth, authorityMetadata } : base.auth;
     const finalCfg: Configuration = { ...base, auth };
+// --- normalize MSAL auth values so they're definitely strings/arrays
+const tenantId = process.env.NEXT_PUBLIC_CIAM_TENANT_ID || '<your-tenant-id>';
+const userFlow = process.env.NEXT_PUBLIC_CIAM_USER_FLOW || 'SignUpSignIn';
+const tenantSub = process.env.NEXT_PUBLIC_CIAM_TENANT_SUBDOMAIN || '11plusdevuks';
+const tenantDomain = `${tenantSub}.ciamlogin.com`;
 
+const computedAuthority = `https://${tenantDomain}/${tenantId}/${userFlow}/v2.0`;
+const computedKnownAuthorities = [tenantDomain, `${tenantId}.ciamlogin.com`];
+
+// Ensure non‑undefined values at runtime
+finalCfg.auth.authority = finalCfg.auth.authority ?? computedAuthority;
+finalCfg.auth.knownAuthorities = finalCfg.auth.knownAuthorities ?? computedKnownAuthorities;
     // Expose what the bundle is actually using (handy for debugging)
     window.__lastMsalCfg = {
       clientId: finalCfg.auth.clientId,
