@@ -205,47 +205,96 @@ app.post('/api/users/init', verifyBearer, async (req: AuthenticatedRequest, res:
    Admin endpoints (email-guard)
 ----------------------------------------------------------------------------- */
 
-const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').toLowerCase();
+// ---- users init/me (keep your existing code above this)
 
-async function isAdmin(req: AuthenticatedRequest): Promise<boolean> {
-  const email = await deriveEmail(req);
-  return email === ADMIN_EMAIL;
+// ====== Helpers ======
+const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+
+/** Pull an email-like identifier from token claims in a tolerant way. */
+function emailFromAuth(auth: unknown): string {
+  const a = auth as Record<string, unknown> | undefined;
+  const preferred = (a?.preferred_username as string | undefined)?.trim();
+  const email = (a?.email as string | undefined)?.trim();
+  const emailsArr = Array.isArray(a?.emails) ? (a!.emails as string[]) : [];
+  const firstFromArray = (emailsArr[0] || '').trim();
+
+  return (preferred || email || firstFromArray || '').toLowerCase();
 }
 
-app.post('/api/admin/users/:subject/approve', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
-  if (!(await isAdmin(req))) return res.status(403).json({ error: 'forbidden' });
-
-  const subject = req.params.subject;
-  await q(`update app_user set status='approved', updated_at=now() where subject=$1`, [subject]);
-  await q(`insert into app_user_audit (subject, action, actor) values ($1,'approved',$2)`, [subject, ADMIN_EMAIL]);
-  res.json({ ok: true });
+// ====== DEBUG: see what the protected path sees ======
+app.get('/debug/whoami', verifyBearer, (req: AuthenticatedRequest, res: Response) => {
+  const derived = emailFromAuth(req.auth);
+  res.json({
+    ok: true,
+    preferred_username: (req.auth?.preferred_username as string | undefined) || null,
+    email: (req.auth as any)?.email ?? null,
+    emails: (req.auth as any)?.emails ?? null,
+    derivedEmail: derived,
+    adminEnv: ADMIN_EMAIL,
+    isAdmin: derived === ADMIN_EMAIL,
+    sub: req.auth?.sub ?? null,
+    scp: req.auth?.scp ?? null,
+  });
 });
 
-app.post('/api/admin/users/:subject/reject', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
-  if (!(await isAdmin(req))) return res.status(403).json({ error: 'forbidden' });
+// ====== Admin endpoints (use robust email derivation) ======
+app.post(
+  '/api/admin/users/:subject/approve',
+  verifyBearer,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const actor = emailFromAuth(req.auth);
+    if (!actor || actor !== ADMIN_EMAIL) {
+      return res.status(403).json({ error: 'forbidden_not_admin', actor, admin: ADMIN_EMAIL });
+    }
+    const subject = req.params.subject;
+    await q(`update app_user set status='approved', updated_at=now() where subject=$1`, [subject]);
+    await q(`insert into app_user_audit (subject, action, actor) values ($1,'approved',$2)`, [
+      subject,
+      actor,
+    ]);
+    res.json({ ok: true });
+  },
+);
 
-  const subject = req.params.subject;
-  await q(`update app_user set status='rejected', updated_at=now() where subject=$1`, [subject]);
-  await q(`insert into app_user_audit (subject, action, actor) values ($1,'rejected',$2)`, [subject, ADMIN_EMAIL]);
-  res.json({ ok: true });
-});
+app.post(
+  '/api/admin/users/:subject/reject',
+  verifyBearer,
+  async (req: AuthenticatedRequest, res: Response) => {
+    const actor = emailFromAuth(req.auth);
+    if (!actor || actor !== ADMIN_EMAIL) {
+      return res.status(403).json({ error: 'forbidden_not_admin', actor, admin: ADMIN_EMAIL });
+    }
+    const subject = req.params.subject;
+    await q(`update app_user set status='rejected', updated_at=now() where subject=$1`, [subject]);
+    await q(`insert into app_user_audit (subject, action, actor) values ($1,'rejected',$2)`, [
+      subject,
+      actor,
+    ]);
+    res.json({ ok: true });
+  },
+);
 
+// Admin: list users (optionally filter by status)
 app.get('/api/admin/users', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
-  if (!(await isAdmin(req))) return res.status(403).json({ error: 'forbidden' });
+  const actor = emailFromAuth(req.auth);
+  if (!actor || actor !== ADMIN_EMAIL) {
+    return res.status(403).json({ error: 'forbidden_not_admin', actor, admin: ADMIN_EMAIL });
+  }
 
   const status = (req.query.status as string) || '';
-  const rows = status
-    ? await q(
-        `select subject, email, display_name, status, created_at, updated_at
-         from app_user where status = $1
-         order by created_at desc limit 200`,
-        [status],
-      )
-    : await q(
-        `select subject, email, display_name, status, created_at, updated_at
-         from app_user
-         order by created_at desc limit 200`,
-      );
+  const rows =
+    status.trim() !== ''
+      ? await q(
+          `select subject, email, display_name, status, created_at, updated_at
+           from app_user where status = $1
+           order by created_at desc limit 200`,
+          [status],
+        )
+      : await q(
+          `select subject, email, display_name, status, created_at, updated_at
+           from app_user
+           order by created_at desc limit 200`,
+        );
 
   res.json({ ok: true, users: rows });
 });
