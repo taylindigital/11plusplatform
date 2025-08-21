@@ -223,17 +223,15 @@ function emailFromAuth(auth: unknown): string {
 
 // ====== DEBUG: see what the protected path sees ======
 app.get('/debug/whoami', verifyBearer, (req: AuthenticatedRequest, res: Response) => {
-  const derived = emailFromAuth(req.auth);
+  const claims = claimsFromReq(req);
+  const derived = emailFromClaims(claims);
+
   res.json({
     ok: true,
-    preferred_username: (req.auth?.preferred_username as string | undefined) || null,
-    email: (req.auth as any)?.email ?? null,
-    emails: (req.auth as any)?.emails ?? null,
     derivedEmail: derived,
     adminEnv: ADMIN_EMAIL,
     isAdmin: derived === ADMIN_EMAIL,
-    sub: req.auth?.sub ?? null,
-    scp: req.auth?.scp ?? null,
+    rawClaimsKeys: Object.keys(claims || {})
   });
 });
 
@@ -242,7 +240,9 @@ app.post(
   '/api/admin/users/:subject/approve',
   verifyBearer,
   async (req: AuthenticatedRequest, res: Response) => {
-    const actor = emailFromAuth(req.auth);
+    const claims = claimsFromReq(req);
+    const actor = emailFromClaims(claims);
+
     if (!actor || actor !== ADMIN_EMAIL) {
       return res.status(403).json({ error: 'forbidden_not_admin', actor, admin: ADMIN_EMAIL });
     }
@@ -260,7 +260,9 @@ app.post(
   '/api/admin/users/:subject/reject',
   verifyBearer,
   async (req: AuthenticatedRequest, res: Response) => {
-    const actor = emailFromAuth(req.auth);
+    const claims = claimsFromReq(req);
+    const actor = emailFromClaims(claims);
+    
     if (!actor || actor !== ADMIN_EMAIL) {
       return res.status(403).json({ error: 'forbidden_not_admin', actor, admin: ADMIN_EMAIL });
     }
@@ -274,9 +276,51 @@ app.post(
   },
 );
 
+/* -----------------------------------------------------------------------------
+   Claims fallback (decode raw token if verifyBearer doesn't give enough)
+----------------------------------------------------------------------------- */
+
+function claimsFromReq(req: AuthenticatedRequest): Record<string, unknown> | undefined {
+  // Prefer what verifyBearer already parsed
+  if (req.auth && typeof req.auth === 'object') {
+    return req.auth as Record<string, unknown>;
+  }
+
+  // Fallback: decode token payload without verifying signature
+  const auth = String(req.headers.authorization || '');
+  const token = auth.replace(/^Bearer\s+/i, '');
+  const parts = token.split('.');
+  if (parts.length !== 3) return undefined;
+
+  try {
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+function emailFromClaims(claims: Record<string, unknown> | undefined): string {
+  if (!claims) return '';
+
+  const getStr = (k: string) => {
+    const v = (claims as any)[k];
+    return typeof v === 'string' ? v.trim().toLowerCase() : '';
+  };
+
+  return (
+    getStr('preferred_username') ||
+    getStr('email') ||
+    (Array.isArray((claims as any).emails) ? String((claims as any).emails[0] || '').toLowerCase() : '') ||
+    getStr('upn') ||
+    getStr('unique_name') ||
+    ''
+  );
+}
+
 // Admin: list users (optionally filter by status)
 app.get('/api/admin/users', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
-  const actor = emailFromAuth(req.auth);
+  const claims = claimsFromReq(req);
+  const actor = emailFromClaims(claims);
   if (!actor || actor !== ADMIN_EMAIL) {
     return res.status(403).json({ error: 'forbidden_not_admin', actor, admin: ADMIN_EMAIL });
   }
