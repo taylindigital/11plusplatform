@@ -1,6 +1,11 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import type {
+  PublicClientApplication,
+  AccountInfo,
+  AuthenticationResult,
+} from '@azure/msal-browser';
 
 type ApiUser = {
   subject: string;
@@ -11,47 +16,39 @@ type ApiUser = {
   updated_at: string;
 };
 
-declare global {
-  interface Window {
-    msalInstance?: any;
-  }
-}
-
 export default function AdminPage() {
   const [loading, setLoading] = useState(true);
   const [users, setUsers] = useState<ApiUser[]>([]);
   const [error, setError] = useState<string>('');
 
-  const apiBase = useMemo(
-    () => process.env.NEXT_PUBLIC_API_BASE || '',
-    []
-  );
-  const scope = useMemo(
-    () => process.env.NEXT_PUBLIC_API_SCOPE || '',
-    []
-  );
+  // NEXT_PUBLIC_* are inlined at build time on the client
+  const apiBase = useMemo(() => process.env.NEXT_PUBLIC_API_BASE || '', []);
+  const scope = useMemo(() => process.env.NEXT_PUBLIC_API_SCOPE || '', []);
   const adminEmail = useMemo(
     () => (process.env.NEXT_PUBLIC_ADMIN_EMAIL || '').toLowerCase(),
-    []
+    [],
   );
 
+  const getMsal = (): PublicClientApplication => {
+    const inst = (window as unknown as {
+      msalInstance?: PublicClientApplication;
+    }).msalInstance;
+    if (!inst) throw new Error('MSAL not available on window');
+    return inst;
+  };
+
   const getAccessToken = async (): Promise<string> => {
-    const msal = window.msalInstance;
-    if (!msal) throw new Error('MSAL not available');
-
-    const accounts = msal.getAllAccounts?.() || [];
+    const msal = getMsal();
+    const accounts: AccountInfo[] = msal.getAllAccounts?.() || [];
     if (!accounts.length) throw new Error('No MSAL account found');
-
-    const account = accounts[0];
     if (!scope) throw new Error('NEXT_PUBLIC_API_SCOPE is missing');
 
-    const result = await msal.acquireTokenSilent({
-      account,
+    const result: AuthenticationResult = await msal.acquireTokenSilent({
+      account: accounts[0],
       scopes: [scope],
     });
-
     if (!result?.accessToken) throw new Error('No accessToken returned');
-    return result.accessToken as string;
+    return result.accessToken;
   };
 
   const fetchPending = async () => {
@@ -60,13 +57,14 @@ export default function AdminPage() {
     try {
       const token = await getAccessToken();
 
-      // (Optional) sanity check: whoami
+      // Optional: whoami sanity check (ignore errors)
       try {
         await fetch(`${apiBase}/debug/whoami`, {
           headers: { Authorization: `Bearer ${token}` },
+          cache: 'no-store',
         });
       } catch {
-        // ignore if 401 here; main call below will tell us more
+        /* ignore */
       }
 
       const res = await fetch(`${apiBase}/api/admin/users?status=pending`, {
@@ -79,8 +77,9 @@ export default function AdminPage() {
       if (!res.ok) throw new Error(`API error: ${res.status}`);
 
       const data = await res.json();
-      // Our API returns { ok: true, users: [...] }
-      setUsers(Array.isArray(data?.users) ? data.users : data);
+      // API returns { ok: true, users: [...] }
+      const list: ApiUser[] = Array.isArray(data?.users) ? data.users : data;
+      setUsers(list);
     } catch (e) {
       setError((e as Error).message || String(e));
       setUsers([]);
@@ -98,7 +97,7 @@ export default function AdminPage() {
     <main className="p-6 max-w-3xl mx-auto">
       <h1 className="text-2xl font-semibold mb-4">Admin</h1>
 
-      <div className="mb-4 text-sm">
+      <div className="mb-4 text-sm space-y-1">
         <div><strong>Admin email (env):</strong> {adminEmail || '(not set)'}</div>
         <div><strong>API base:</strong> {apiBase}</div>
         <div><strong>Scope:</strong> {scope}</div>
@@ -142,8 +141,10 @@ function ApproveButton({ subject, onDone }: { subject: string; onDone: () => voi
   const scope = process.env.NEXT_PUBLIC_API_SCOPE || '';
 
   const doApprove = async () => {
-    const msal = window.msalInstance;
-    const account = msal?.getAllAccounts?.()[0];
+    const msal = (window as unknown as {
+      msalInstance?: PublicClientApplication;
+    }).msalInstance!;
+    const account = msal.getAllAccounts()[0];
     const { accessToken } = await msal.acquireTokenSilent({ account, scopes: [scope] });
     await fetch(`${apiBase}/api/admin/users/${encodeURIComponent(subject)}/approve`, {
       method: 'POST',
@@ -164,8 +165,10 @@ function RejectButton({ subject, onDone }: { subject: string; onDone: () => void
   const scope = process.env.NEXT_PUBLIC_API_SCOPE || '';
 
   const doReject = async () => {
-    const msal = window.msalInstance;
-    const account = msal?.getAllAccounts?.()[0];
+    const msal = (window as unknown as {
+      msalInstance?: PublicClientApplication;
+    }).msalInstance!;
+    const account = msal.getAllAccounts()[0];
     const { accessToken } = await msal.acquireTokenSilent({ account, scopes: [scope] });
     await fetch(`${apiBase}/api/admin/users/${encodeURIComponent(subject)}/reject`, {
       method: 'POST',
