@@ -77,7 +77,6 @@ export default function Providers({ children }: { children: React.ReactNode }) {
     const finalCfg: Configuration = { ...base, auth };
 
     // Expose what the bundle is actually using (handy for debugging)
-    // @ts-expect-error – attach for diagnostics only
     window.__lastMsalCfg = {
       clientId: finalCfg.auth.clientId,
       authority: finalCfg.auth.authority,
