@@ -1,119 +1,154 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
-import { MsalProvider } from '@azure/msal-react';
+import type { ReactNode } from 'react';
 import {
   PublicClientApplication,
+  type AccountInfo,
   type Configuration,
-  LogLevel,
+  type RedirectRequest,
+  type SilentRequest,
 } from '@azure/msal-browser';
+import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 
-type OidcMetadata = Record<string, unknown>;
+type AuthCtx = {
+  msal: PublicClientApplication | null;
+  account: AccountInfo | null;
+  login: () => Promise<void>;
+  logout: () => Promise<void>;
+};
 
-const clientId = process.env.NEXT_PUBLIC_CIAM_CLIENT_ID as string;
-const authority = process.env.NEXT_PUBLIC_CIAM_AUTHORITY as string; // e.g. https://<sub>.ciamlogin.com/<tenantId>/<policy>/v2.0
-const knownAuthorities = [
-  process.env.NEXT_PUBLIC_CIAM_DOMAIN as string,            // e.g. 11plusdevuks.ciamlogin.com
-  `${process.env.NEXT_PUBLIC_CIAM_TENANT_ID}.ciamlogin.com` // safety: <tenantId>.ciamlogin.com
-].filter(Boolean);
+const AuthContext = createContext<AuthCtx>({
+  msal: null,
+  account: null,
+  login: async () => {},
+  logout: async () => {},
+});
 
-const metadataUrl = process.env.NEXT_PUBLIC_CIAM_METADATA_URL as string; // e.g. .../.well-known/openid-configuration?p=SignUpSignIn
-
-function baseConfig(): Configuration {
-  return {
-    auth: {
-      clientId,
-      authority,
-      knownAuthorities,
-      navigateToLoginRequestUrl: false,
-    },
-    cache: {
-      cacheLocation: 'sessionStorage',
-      storeAuthStateInCookie: false,
-    },
-    system: {
-      loggerOptions: {
-        loggerCallback: (level, message) => {
-          if (level === LogLevel.Error) console.error('[MSAL]', message);
-        },
-        logLevel: LogLevel.Error,
-      },
-    },
-  };
+function buildAuthority(tenantId: string, userFlow: string, domain: string) {
+  // Example: https://11plusdevuks.ciamlogin.com/{tenant}/{policy}/v2.0
+  return `https://${domain}/${tenantId}/${userFlow}/v2.0`;
 }
 
-export default function Providers({ children }: { children: React.ReactNode }) {
-  const [authorityMetadata, setAuthorityMetadata] = useState<string | null>(null);
-  const [pca, setPca] = useState<PublicClientApplication | null>(null);
+function buildMetadataUrl(tenantId: string, userFlow: string, domain: string) {
+  // Example: https://11plusdevuks.ciamlogin.com/{tenant}/v2.0/.well-known/openid-configuration?p=SignUpSignIn
+  return `https://${domain}/${tenantId}/v2.0/.well-known/openid-configuration?p=${userFlow}`;
+}
 
-  // 1) Fetch the metadata JSON once and stringify it for MSAL
-  useEffect(() => {
-    let cancelled = false;
+export default function Providers({ children }: { children: ReactNode }) {
+  const [msal, setMsal] = useState<PublicClientApplication | null>(null);
+  const [account, setAccount] = useState<AccountInfo | null>(null);
 
-    async function load() {
-      try {
-        const resp = await fetch(metadataUrl, { cache: 'no-store', mode: 'cors' });
-        if (!resp.ok) throw new Error(`metadata ${resp.status}`);
-        const json: OidcMetadata = await resp.json();
-        if (!cancelled) setAuthorityMetadata(JSON.stringify(json));
-      } catch (e) {
-        console.error('[MSAL] metadata fetch failed:', e);
-        if (!cancelled) setAuthorityMetadata(null);
-      }
-    }
+  const cfgPieces = useMemo(() => {
+    const domain = process.env.NEXT_PUBLIC_CIAM_DOMAIN ?? '';
+    const tenantId = process.env.NEXT_PUBLIC_CIAM_TENANT_ID ?? '';
+    const userFlow = process.env.NEXT_PUBLIC_CIAM_USER_FLOW ?? 'SignUpSignIn';
+    const clientId = process.env.NEXT_PUBLIC_CIAM_CLIENT_ID ?? '';
+    const redirectUri = process.env.NEXT_PUBLIC_REDIRECT_URI ?? '/';
+    const postLogoutRedirectUri =
+      process.env.NEXT_PUBLIC_POST_LOGOUT_REDIRECT_URI ?? redirectUri;
 
-    load();
-    return () => { cancelled = true; };
+    const authority = buildAuthority(tenantId, userFlow, domain);
+    const metadataUrl = buildMetadataUrl(tenantId, userFlow, domain);
+
+    return {
+      domain,
+      tenantId,
+      userFlow,
+      clientId,
+      authority,
+      metadataUrl,
+      redirectUri,
+      postLogoutRedirectUri,
+    };
   }, []);
 
-  // 2) Build the final config (inject authorityMetadata when we have it)
-  const cfg: Configuration | null = useMemo(() => {
-    if (!clientId || !authority || knownAuthorities.length === 0) {
-      console.error('[MSAL] missing envs', { clientId, authority, knownAuthorities });
-      return null;
-    }
-    const base = baseConfig();
-    const auth = authorityMetadata ? { ...base.auth, authorityMetadata } : base.auth;
-    const finalCfg: Configuration = { ...base, auth };
-// --- normalize MSAL auth values so they're definitely strings/arrays
-const tenantId = process.env.NEXT_PUBLIC_CIAM_TENANT_ID || '<your-tenant-id>';
-const userFlow = process.env.NEXT_PUBLIC_CIAM_USER_FLOW || 'SignUpSignIn';
-const tenantSub = process.env.NEXT_PUBLIC_CIAM_TENANT_SUBDOMAIN || '11plusdevuks';
-const tenantDomain = `${tenantSub}.ciamlogin.com`;
-
-const computedAuthority = `https://${tenantDomain}/${tenantId}/${userFlow}/v2.0`;
-const computedKnownAuthorities = [tenantDomain, `${tenantId}.ciamlogin.com`];
-
-// Ensure non‑undefined values at runtime
-finalCfg.auth.authority = finalCfg.auth.authority ?? computedAuthority;
-finalCfg.auth.knownAuthorities = finalCfg.auth.knownAuthorities ?? computedKnownAuthorities;
-    // Expose what the bundle is actually using (handy for debugging)
-    window.__lastMsalCfg = {
-      clientId: finalCfg.auth.clientId,
-      authority: finalCfg.auth.authority,
-      knownAuthorities: finalCfg.auth.knownAuthorities,
-      metadataUrl,
-      hasAuthorityMetadata: Boolean(authorityMetadata),
-    };
-    console.log('[MSAL cfg]', window.__lastMsalCfg);
-
-    return finalCfg;
-  }, [authorityMetadata]);
-
-  // 3) Create and initialize PCA once we have a config
   useEffect(() => {
-    if (!cfg) return;
-    const instance = new PublicClientApplication(cfg);
-    instance.initialize().then(() => setPca(instance)).catch(err => {
-      console.error('[MSAL] initialize failed', err);
-      setPca(null);
+    if (typeof window === 'undefined') return;
+
+    const init = async () => {
+      let authorityMetadata: string | undefined;
+
+      // Preload authority metadata to avoid CORS / resolution flakiness.
+      try {
+        const res = await fetch(cfgPieces.metadataUrl, { cache: 'no-store', mode: 'cors' });
+        if (res.ok) authorityMetadata = await res.text();
+      } catch {
+        // ignore; MSAL will fetch on its own as a fallback
+      }
+
+      const config: Configuration = {
+        auth: {
+          clientId: cfgPieces.clientId,
+          authority: cfgPieces.authority,
+          knownAuthorities: [cfgPieces.domain, `${cfgPieces.tenantId}.ciamlogin.com`],
+          ...(authorityMetadata ? { authorityMetadata } : {}),
+          redirectUri: cfgPieces.redirectUri,
+          postLogoutRedirectUri: cfgPieces.postLogoutRedirectUri,
+        },
+        cache: { cacheLocation: 'localStorage' },
+      };
+
+      // Debug surface
+      window.__lastMsalCfg = {
+        authority: config.auth.authority,
+        metadataUrl: cfgPieces.metadataUrl,
+        knownAuthorities: config.auth.knownAuthorities ?? [],
+        clientIdPresent: Boolean(config.auth.clientId),
+        hasAuthorityMetadata: Boolean(authorityMetadata),
+        account: null,
+      };
+
+      const instance = new PublicClientApplication(config);
+      await instance.initialize();
+
+      // Handle possible redirect response
+      try {
+        const result = await instance.handleRedirectPromise();
+        if (result?.account) setAccount(result.account);
+      } catch {
+        // swallow to avoid breaking the page on startup
+      }
+
+      const accs = instance.getAllAccounts();
+      if (accs.length > 0) setAccount(accs[0]);
+
+      window.msalInstance = instance;
+      if (window.__lastMsalCfg) {
+        window.__lastMsalCfg.account = accs[0]
+          ? { username: accs[0].username, homeAccountId: accs[0].homeAccountId }
+          : null;
+      }
+
+      setMsal(instance);
+    };
+
+    void init();
+  }, [cfgPieces]);
+
+  const login = async () => {
+    if (!msal) return;
+    const req: RedirectRequest = {
+      // Scope can be empty for login; we’ll just create a session.
+      redirectUri: cfgPieces.redirectUri,
+    };
+    await msal.loginRedirect(req);
+  };
+
+  const logout = async () => {
+    if (!msal) return;
+    await msal.logoutRedirect({
+      postLogoutRedirectUri: cfgPieces.postLogoutRedirectUri,
     });
-  }, [cfg]);
+    setAccount(null);
+  };
 
-  if (!pca) {
-    // Optional: small skeleton while MSAL/metadata loads
-    return <div className="p-4 text-sm text-gray-600">Loading authentication…</div>;
-  }
+  return (
+    <AuthContext.Provider value={{ msal, account, login, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
 
-  return <MsalProvider instance={pca}>{children}</MsalProvider>;
+export function useAuth() {
+  return useContext(AuthContext);
 }

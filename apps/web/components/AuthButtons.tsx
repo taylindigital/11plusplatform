@@ -1,47 +1,32 @@
 'use client';
-import { useEffect } from 'react';
-import { useMsal } from '@azure/msal-react';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE!;
-const API_SCOPE = process.env.NEXT_PUBLIC_API_SCOPE!;
+import { useAuth } from '@/app/providers';
 
 export default function AuthButtons() {
-  const { instance, accounts } = useMsal();
-  const loggedIn = accounts.length > 0;
+  const { msal, account, login, logout } = useAuth();
 
-  const login = async () => {
-    await instance.loginRedirect({
-      scopes: ['openid', 'profile', 'email'],
-      redirectStartPage: '/',
-    });
-  };
-
-  const logout = () => instance.logoutRedirect();
-
-  // After login, call /api/users/init once to upsert our user
-  useEffect(() => {
-    (async () => {
-      if (!loggedIn) return;
-      const { accessToken } = await instance.acquireTokenSilent({
-        account: accounts[0],
-        scopes: [API_SCOPE],
-      });
-      await fetch(`${API_BASE}/api/users/init`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-    })();
-  }, [loggedIn, instance, accounts]);
+  const label = account?.username
+    ? `Signed in as ${account.username}`
+    : 'Not signed in';
 
   return (
     <div className="flex flex-col items-center gap-3">
-      {loggedIn ? (
-        <button className="px-4 py-2 rounded bg-black text-white" onClick={logout}>
-          Logout
+      <div className="text-sm text-gray-700">{label}</div>
+
+      {!account ? (
+        <button
+          onClick={() => void login()}
+          className="px-4 py-2 rounded bg-blue-600 text-white"
+          disabled={!msal}
+        >
+          Login / Sign up
         </button>
       ) : (
-        <button className="px-4 py-2 rounded bg-blue-600 text-white" onClick={login}>
-          Login / Sign up
+        <button
+          onClick={() => void logout()}
+          className="px-4 py-2 rounded bg-gray-700 text-white"
+        >
+          Logout
         </button>
       )}
     </div>
