@@ -16,39 +16,38 @@ declare global {
 
 // ---- Build MSAL config from env (throw early if something is missing)
 const cfgFromEnv = () => {
-  const clientId = process.env.NEXT_PUBLIC_CIAM_CLIENT_ID;
-  const authority = process.env.NEXT_PUBLIC_CIAM_AUTHORITY;
-  const domain = process.env.NEXT_PUBLIC_CIAM_DOMAIN;
-  const redirectUri = process.env.NEXT_PUBLIC_REDIRECT_URI;
-  const postLogoutRedirectUri = process.env.NEXT_PUBLIC_POST_LOGOUT_REDIRECT_URI;
+  const clientId = process.env.NEXT_PUBLIC_CIAM_CLIENT_ID ?? '';
+  const domain = process.env.NEXT_PUBLIC_CIAM_DOMAIN ?? ''; // e.g. 11plusdevuks.ciamlogin.com
+  const baseAuthority =
+    process.env.NEXT_PUBLIC_CIAM_AUTHORITY // should be base without policy
+      ?? '';
+  const metadataUrl =
+    process.env.NEXT_PUBLIC_CIAM_METADATA_URL // must include ?p=SignUpSignIn
+      ?? '';
 
-  if (!clientId || !authority || !domain || !redirectUri || !postLogoutRedirectUri) {
-    // eslint-disable-next-line no-console
-    console.error('Missing MSAL envs', {
-      clientId: !!clientId,
-      authority: !!authority,
-      domain: !!domain,
-      redirectUri: !!redirectUri,
-      postLogoutRedirectUri: !!postLogoutRedirectUri,
-    });
-  }
+  const redirectUri = process.env.NEXT_PUBLIC_REDIRECT_URI ?? '/';
+  const postLogoutRedirectUri =
+    process.env.NEXT_PUBLIC_POST_LOGOUT_REDIRECT_URI ?? '/';
 
   const msalConfig: Configuration = {
     auth: {
-      clientId: clientId ?? '',
-      authority: authority ?? '',
-      knownAuthorities: domain ? [domain] : [],
-      redirectUri: redirectUri ?? '/',
-      postLogoutRedirectUri: postLogoutRedirectUri ?? '/',
+      clientId,
+      authority: baseAuthority,                 // NO policy here
+      knownAuthorities: domain ? [domain] : [], // your CIAM domain
+      redirectUri,
+      postLogoutRedirectUri,
+      authorityMetadata: metadataUrl || undefined, // pin discovery to policy URL with ?p=
     },
     system: {
-      loggerOptions: {
-        loggerCallback: () => {},
-        piiLoggingEnabled: false,
-        logLevel: LogLevel.Error,
-      },
+      loggerOptions: { loggerCallback: () => {}, piiLoggingEnabled: false, logLevel: LogLevel.Error },
     },
   };
+
+  // quick sanity log
+  if (!clientId || !baseAuthority || !domain || !metadataUrl) {
+    // eslint-disable-next-line no-console
+    console.error('MSAL envs missing/invalid', { clientId: !!clientId, baseAuthority, domain, metadataUrl });
+  }
 
   return msalConfig;
 };
