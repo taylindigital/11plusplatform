@@ -170,6 +170,18 @@ app.get('/api/admin/users', verifyBearer, async (req: AuthenticatedRequest, res:
   res.json({ ok: true, users: rows });
 });
 
+// --- TEMP: see token claims the API is using
+app.get('/debug/auth', verifyBearer, (req: AuthenticatedRequest, res: Response) => {
+  res.json({
+    preferred_username: (req.auth?.preferred_username || '').toLowerCase(),
+    emails0: (((req.auth as any)?.emails?.[0] as string) || '').toLowerCase(),
+    name: (req.auth?.name || ''),
+    sub: req.auth?.sub,
+    scope: req.auth?.scp,
+    ADMIN_EMAIL: (process.env.ADMIN_EMAIL || '').toLowerCase(),
+  });
+});
+
 // ---- 404
 app.use((_req: Request, res: Response) => res.status(404).json({ error: 'not_found' }));
 
