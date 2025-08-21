@@ -1,84 +1,59 @@
 'use client';
-
-import { ReactNode, useEffect, useMemo } from 'react';
-import { MsalProvider } from '@azure/msal-react';
+import { ReactNode, useMemo } from 'react';
 import { PublicClientApplication, type Configuration, LogLevel } from '@azure/msal-browser';
+import { MsalProvider } from '@azure/msal-react';
 
-// ---- Strongly type the globals we want to expose (no `any`)
-declare global {
-  interface Window {
-    msalInstance?: PublicClientApplication;
-    __env?: {
-      NEXT_PUBLIC_API_SCOPE?: string;
-    };
-  }
-}
+type Props = { children: ReactNode };
 
-// ---- Build MSAL config from env (throw early if something is missing)
-const cfgFromEnv = () => {
+const buildMsalConfig = (): Configuration => {
   const clientId = process.env.NEXT_PUBLIC_CIAM_CLIENT_ID ?? '';
-  const domain = process.env.NEXT_PUBLIC_CIAM_DOMAIN ?? ''; // e.g. 11plusdevuks.ciamlogin.com
-  const baseAuthority =
-    process.env.NEXT_PUBLIC_CIAM_AUTHORITY // should be base without policy
-      ?? '';
-  const metadataUrl =
-    process.env.NEXT_PUBLIC_CIAM_METADATA_URL // must include ?p=SignUpSignIn
-      ?? '';
-
+  const domain = process.env.NEXT_PUBLIC_CIAM_DOMAIN ?? ''; // 11plusdevuks.ciamlogin.com
+  const authority = (process.env.NEXT_PUBLIC_CIAM_AUTHORITY ?? '').replace(/\/+$/, ''); // NO policy here
+  const metadataUrl = (process.env.NEXT_PUBLIC_CIAM_METADATA_URL ?? '').replace(/\/+$/, ''); // must have ?p=SignUpSignIn
   const redirectUri = process.env.NEXT_PUBLIC_REDIRECT_URI ?? '/';
-  const postLogoutRedirectUri =
-    process.env.NEXT_PUBLIC_POST_LOGOUT_REDIRECT_URI ?? '/';
+  const postLogoutRedirectUri = process.env.NEXT_PUBLIC_POST_LOGOUT_REDIRECT_URI ?? '/';
 
-  const msalConfig: Configuration = {
+  // Secondary host sometimes appears as issuer in metadata (tenantId host)
+  const tenantId = process.env.NEXT_PUBLIC_CIAM_TENANT_ID ?? '';
+  const issuerHost = tenantId ? `${tenantId}.ciamlogin.com` : undefined;
+
+  const cfg: Configuration = {
     auth: {
       clientId,
-      authority: baseAuthority,                 // NO policy here
-      knownAuthorities: domain ? [domain] : [], // your CIAM domain
+      authority,                       // base tenant authority (no policy)
+      knownAuthorities: issuerHost ? [domain, issuerHost] : [domain],
+      authorityMetadata: metadataUrl,  // pin discovery to ?p=SignUpSignIn
       redirectUri,
       postLogoutRedirectUri,
-      authorityMetadata: metadataUrl || undefined, // pin discovery to policy URL with ?p=
     },
     system: {
-      loggerOptions: { loggerCallback: () => {}, piiLoggingEnabled: false, logLevel: LogLevel.Error },
+      loggerOptions: {
+        loggerCallback: () => {},
+        piiLoggingEnabled: false,
+        logLevel: LogLevel.Error,
+      },
+    },
+    cache: {
+      cacheLocation: 'localStorage',
+      storeAuthStateInCookie: false,
     },
   };
 
-  // quick sanity log
-  if (!clientId || !baseAuthority || !domain || !metadataUrl) {
+  if (typeof window !== 'undefined') {
+    // one-time sanity log (short + safe)
     // eslint-disable-next-line no-console
-    console.error('MSAL envs missing/invalid', { clientId: !!clientId, baseAuthority, domain, metadataUrl });
+    console.log('[MSAL cfg]', {
+      clientId: !!clientId,
+      authority,
+      metadataUrl,
+      knownAuthorities: cfg.auth.knownAuthorities,
+    });
   }
 
-  return msalConfig;
+  return cfg;
 };
 
-export default function Providers({ children }: { children: ReactNode }) {
-  const msalConfig = useMemo(cfgFromEnv, []);
-  const pca = useMemo(() => new PublicClientApplication(msalConfig), [msalConfig]);
-
-  useEffect(() => {
-    let mounted = true;
-
-    pca.initialize().then(() => {
-      if (!mounted) return;
-
-      const accounts = pca.getAllAccounts();
-      if (accounts.length && !pca.getActiveAccount()) {
-        pca.setActiveAccount(accounts[0]);
-      }
-
-      // Expose for console diagnostics (typed via `declare global` above)
-      window.msalInstance = pca;
-      window.__env = {
-        ...(window.__env ?? {}),
-        NEXT_PUBLIC_API_SCOPE: process.env.NEXT_PUBLIC_API_SCOPE,
-      };
-    });
-
-    return () => {
-      mounted = false;
-    };
-  }, [pca]);
-
+export default function Providers({ children }: Props) {
+  const pca = useMemo(() => new PublicClientApplication(buildMsalConfig()), []);
   return <MsalProvider instance={pca}>{children}</MsalProvider>;
 }
