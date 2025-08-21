@@ -67,17 +67,20 @@ app.get('/api/ping', verifyBearer, (req: AuthenticatedRequest, res: Response) =>
 
 // ---- users: init + me
 app.post('/api/users/init', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
-  const sub = req.auth?.sub;
-  const email = (req.auth?.preferred_username as string) || '';
-  const given = (req.auth as Record<string, unknown>)?.['given_name'] as string | undefined;
-  const family = (req.auth as Record<string, unknown>)?.['family_name'] as string | undefined;
-  const fullFromParts = [given, family].filter(Boolean).join(' ').trim();
-  const name =
-    (req.auth?.name as string) ||
-    fullFromParts ||
-    email.split('@')[0];
+  const claims = req.auth as any;
+  const sub = claims?.sub as string | undefined;
+  const email =
+    (claims?.preferred_username as string | undefined)
+    || (claims?.emails?.[0] as string | undefined)
+    || '';
 
-  if (!sub || !email) return res.status(400).json({ error: 'missing_claims' });
+  const given = (claims?.given_name as string | undefined) || '';
+  const family = (claims?.family_name as string | undefined) || '';
+  const nameFromParts = [given, family].filter(Boolean).join(' ').trim();
+  const name = (claims?.name as string | undefined) || nameFromParts || (email.split('@')[0] || '').trim();
+
+  if (!sub) return res.status(400).json({ error: 'missing_claim_sub', debug: { claimsPresent: Object.keys(claims || {}) } });
+  if (!email) return res.status(400).json({ error: 'missing_claim_email', debug: { preferred_username: claims?.preferred_username, emails: claims?.emails } });
 
   await q(
     `
@@ -87,7 +90,7 @@ app.post('/api/users/init', verifyBearer, async (req: AuthenticatedRequest, res:
       email = excluded.email,
       display_name = excluded.display_name,
       updated_at = now()
-    `,
+  `,
     [sub, email, name],
   );
 
@@ -180,6 +183,32 @@ app.get('/debug/auth', verifyBearer, (req: AuthenticatedRequest, res: Response) 
     scope: req.auth?.scp,
     ADMIN_EMAIL: (process.env.ADMIN_EMAIL || '').toLowerCase(),
   });
+});
+// --- DEBUG: see the claims the API receives
+app.get('/debug/auth', verifyBearer, (req: AuthenticatedRequest, res: Response) => {
+  res.json({
+    preferred_username: (req.auth?.preferred_username || '').toLowerCase(),
+    emails0: (((req.auth as any)?.emails?.[0] as string) || '').toLowerCase(),
+    name: req.auth?.name || '',
+    sub: req.auth?.sub || '',
+    scope: req.auth?.scp || '',
+    aud: (req.auth as any)?.aud || '',
+    ADMIN_EMAIL, // from earlier helper
+  });
+});
+
+// --- who am I / current status
+app.get('/api/users/me', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
+  const sub = req.auth?.sub || '';
+  if (!sub) return res.status(400).json({ error: 'missing_sub' });
+
+  const rows = await q<{ subject: string; email: string; display_name: string; status: string }>(
+    `select subject, email, display_name, status from app_user where subject=$1`,
+    [sub]
+  );
+
+  if (!rows.length) return res.status(404).json({ error: 'not_found' });
+  res.json(rows[0]);
 });
 
 // ---- 404
