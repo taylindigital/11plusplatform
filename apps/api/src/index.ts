@@ -1,16 +1,17 @@
-import express, { type Request, type Response, type NextFunction } from 'express';
-import cors, { type CorsOptions } from 'cors';
+import express, { type Request, type Response } from 'express';
+import cors, { CorsOptionsDelegate } from 'cors';
 import morgan from 'morgan';
 import { verifyBearer, type AuthenticatedRequest } from './auth.js';
 import { q } from './db.js';
 
-// ---- create app FIRST - 20250821-09:32am version
+// ----------------------
+// App + CORS
+// ----------------------
 const app = express();
 
-// ---- config & middleware
 const SWA_ORIGIN = (process.env.SWA_ORIGIN || 'https://nice-ocean-0e8063c03.2.azurestaticapps.net').replace(/\/+$/, '');
 
-const isAllowedOrigin = (origin: string | undefined | null): boolean => {
+const isAllowedOrigin = (origin: string): boolean => {
   if (!origin) return false;
   const norm = origin.replace(/\/+$/, '');
   if (norm === SWA_ORIGIN) return true;
@@ -18,32 +19,30 @@ const isAllowedOrigin = (origin: string | undefined | null): boolean => {
   try {
     const host = new URL(norm).hostname.toLowerCase();
     if (host.endsWith('.azurestaticapps.net')) return true;
-  } catch { /* ignore */ }
+  } catch {}
   return false;
 };
 
-const corsOptions: CorsOptions = {
-  origin: (origin, cb) => cb(null, isAllowedOrigin(origin) ? origin : false),
-  credentials: false,
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Authorization', 'Content-Type'],
-  optionsSuccessStatus: 204,
-  maxAge: 600,
+const corsOptions: CorsOptionsDelegate = (req, cb) => {
+  const origin = String(req.headers.origin || '');
+  const allowed = isAllowedOrigin(origin);
+  cb(null, {
+    origin: allowed ? origin : false,
+    credentials: false,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type'],
+    maxAge: 600,
+  });
 };
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
-
 app.use(express.json());
 app.use(morgan('tiny'));
 
-// ---- debug CORS endpoint
-app.get('/debug/cors', (req, res) => {
-  const origin = (req.headers['origin'] || '').toString();
-  res.json({ origin, SWA_ORIGIN, allowed: isAllowedOrigin(origin) });
-});
-
-// ---- health endpoints
+// ----------------------
+// Health
+// ----------------------
 app.get('/health', (_req: Request, res: Response) => res.json({ ok: true }));
 
 app.get('/health/db', async (_req: Request, res: Response) => {
@@ -55,7 +54,40 @@ app.get('/health/db', async (_req: Request, res: Response) => {
   }
 });
 
-// ---- protected sample
+// ----------------------
+// Debug helpers
+// ----------------------
+app.get('/debug/env', (_req: Request, res: Response) => {
+  res.json({
+    ADMIN_EMAIL: (process.env.ADMIN_EMAIL || '').toString(),
+    SWA_ORIGIN,
+  });
+});
+
+// shows what the token actually contains (only with a token)
+app.get('/debug/whoami', verifyBearer, (req: AuthenticatedRequest, res: Response) => {
+  res.json({
+    preferred_username: req.auth?.preferred_username,
+    sub: req.auth?.sub,
+    name: req.auth?.name,
+    email_hint: (req.auth?.preferred_username || '').toString(),
+  });
+});
+
+// shows the exact comparison the admin gate uses
+app.get('/debug/admin-check', verifyBearer, (req: AuthenticatedRequest, res: Response) => {
+  const adminEnv = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+  const fromToken = (req.auth?.preferred_username || '').trim().toLowerCase();
+  res.json({
+    ADMIN_EMAIL_env: adminEnv,
+    preferred_username_token: fromToken,
+    equal: adminEnv && fromToken ? adminEnv === fromToken : false,
+  });
+});
+
+// ----------------------
+// Sample protected ping
+// ----------------------
 app.get('/api/ping', verifyBearer, (req: AuthenticatedRequest, res: Response) => {
   res.json({
     ok: true,
@@ -65,22 +97,21 @@ app.get('/api/ping', verifyBearer, (req: AuthenticatedRequest, res: Response) =>
   });
 });
 
-// ---- users: init + me
+// ----------------------
+// Users: init (+audit) and me
+// ----------------------
 app.post('/api/users/init', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
-  const claims = req.auth as any;
-  const sub = claims?.sub as string | undefined;
-  const email =
-    (claims?.preferred_username as string | undefined)
-    || (claims?.emails?.[0] as string | undefined)
-    || '';
+  const sub = req.auth?.sub;
+  const email = (req.auth?.preferred_username as string) || '';
+  const given = (req.auth as unknown as { given_name?: string })?.given_name;
+  const family = (req.auth as unknown as { family_name?: string })?.family_name;
+  const fullFromParts = [given, family].filter(Boolean).join(' ').trim();
+  const name =
+    (req.auth?.name as string) ||
+    fullFromParts ||
+    email.split('@')[0];
 
-  const given = (claims?.given_name as string | undefined) || '';
-  const family = (claims?.family_name as string | undefined) || '';
-  const nameFromParts = [given, family].filter(Boolean).join(' ').trim();
-  const name = (claims?.name as string | undefined) || nameFromParts || (email.split('@')[0] || '').trim();
-
-  if (!sub) return res.status(400).json({ error: 'missing_claim_sub', debug: { claimsPresent: Object.keys(claims || {}) } });
-  if (!email) return res.status(400).json({ error: 'missing_claim_email', debug: { preferred_username: claims?.preferred_username, emails: claims?.emails } });
+  if (!sub || !email) return res.status(400).json({ error: 'missing_claims' });
 
   await q(
     `
@@ -104,34 +135,30 @@ app.post('/api/users/init', verifyBearer, async (req: AuthenticatedRequest, res:
   res.json({ ok: true, status: me?.status || 'pending' });
 });
 
+// Optional: who am I endpoint used by the UI (if you call it)
 app.get('/api/users/me', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
   const sub = req.auth?.sub;
-  const email =
-  (req.auth?.preferred_username as string) ||
-  ((req.auth as Record<string, unknown>)?.['emails'] as string[] | undefined)?.[0] ||
-  '';
-  const given = (req.auth as Record<string, unknown>)?.['given_name'] as string | undefined;  
-  const family = (req.auth as Record<string, unknown>)?.['family_name'] as string | undefined;
-  if (!sub) return res.status(401).json({ error: 'missing_claims' });
-  const rows = await q<{ subject: string; email: string; display_name: string; status: string }>(
-    `select subject, email, display_name, status from app_user where subject=$1`,
+  if (!sub) return res.status(400).json({ error: 'missing_sub' });
+  const [me] = await q<{ status: string; email: string; display_name: string }>(
+    `select status, email, display_name from app_user where subject=$1`,
     [sub],
   );
-  if (!rows[0]) return res.status(404).json({ error: 'not_found' });
-  res.json(rows[0]);
+  if (!me) return res.status(404).json({ error: 'not_found' });
+  res.json({ ok: true, me });
 });
 
-// ---- admin approve/reject (email guard for now)
-const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').toLowerCase();
+// ----------------------
+// Admin gates (email guard with normalization)
+// ----------------------
+const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+
+function isAdmin(req: AuthenticatedRequest): boolean {
+  const fromToken = (req.auth?.preferred_username || '').trim().toLowerCase();
+  return ADMIN_EMAIL.length > 0 && fromToken === ADMIN_EMAIL;
+}
 
 app.post('/api/admin/users/:subject/approve', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
-const actorEmail =
-  (req.auth?.preferred_username || '').toLowerCase() ||
-  ((((req.auth as any)?.emails?.[0] as string) || '').toLowerCase());
-
-if (actorEmail !== ADMIN_EMAIL) {
-  return res.status(403).json({ error: 'forbidden' });
-}
+  if (!isAdmin(req)) return res.status(403).json({ error: 'forbidden' });
   const subject = req.params.subject;
   await q(`update app_user set status='approved', updated_at=now() where subject=$1`, [subject]);
   await q(`insert into app_user_audit (subject, action, actor) values ($1,'approved',$2)`, [subject, ADMIN_EMAIL]);
@@ -139,13 +166,7 @@ if (actorEmail !== ADMIN_EMAIL) {
 });
 
 app.post('/api/admin/users/:subject/reject', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
-const actorEmail =
-  (req.auth?.preferred_username || '').toLowerCase() ||
-  ((((req.auth as any)?.emails?.[0] as string) || '').toLowerCase());
-
-if (actorEmail !== ADMIN_EMAIL) {
-  return res.status(403).json({ error: 'forbidden' });
-}
+  if (!isAdmin(req)) return res.status(403).json({ error: 'forbidden' });
   const subject = req.params.subject;
   await q(`update app_user set status='rejected', updated_at=now() where subject=$1`, [subject]);
   await q(`insert into app_user_audit (subject, action, actor) values ($1,'rejected',$2)`, [subject, ADMIN_EMAIL]);
@@ -153,9 +174,7 @@ if (actorEmail !== ADMIN_EMAIL) {
 });
 
 app.get('/api/admin/users', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
-  if ((req.auth?.preferred_username || '').toLowerCase() !== ADMIN_EMAIL) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
+  if (!isAdmin(req)) return res.status(403).json({ error: 'forbidden' });
   const status = (req.query.status as string) || '';
   const rows = status
     ? await q(
@@ -169,101 +188,35 @@ app.get('/api/admin/users', verifyBearer, async (req: AuthenticatedRequest, res:
          from app_user
          order by created_at desc limit 200`,
       );
-
   res.json({ ok: true, users: rows });
 });
 
-// --- TEMP: see token claims the API is using
-app.get('/debug/auth', verifyBearer, (req: AuthenticatedRequest, res: Response) => {
-  res.json({
-    preferred_username: (req.auth?.preferred_username || '').toLowerCase(),
-    emails0: (((req.auth as any)?.emails?.[0] as string) || '').toLowerCase(),
-    name: (req.auth?.name || ''),
-    sub: req.auth?.sub,
-    scope: req.auth?.scp,
-    ADMIN_EMAIL: (process.env.ADMIN_EMAIL || '').toLowerCase(),
-  });
-});
-// --- DEBUG: see the claims the API receives
-app.get('/debug/auth', verifyBearer, (req: AuthenticatedRequest, res: Response) => {
-  res.json({
-    preferred_username: (req.auth?.preferred_username || '').toLowerCase(),
-    emails0: (((req.auth as any)?.emails?.[0] as string) || '').toLowerCase(),
-    name: req.auth?.name || '',
-    sub: req.auth?.sub || '',
-    scope: req.auth?.scp || '',
-    aud: (req.auth as any)?.aud || '',
-    ADMIN_EMAIL, // from earlier helper
-  });
-});
-
-// --- DEBUG: show what the API sees
-app.get('/debug/env', (_req: Request, res: Response) => {
-  res.json({
-    ADMIN_EMAIL: (process.env.ADMIN_EMAIL || '').toLowerCase(),
-    SWA_ORIGIN: process.env.SWA_ORIGIN || '',
-  });
-});
-
-app.get('/debug/whoami', verifyBearer, (req: AuthenticatedRequest, res: Response) => {
-  res.json({
-    preferred_username: req.auth?.preferred_username || null,
-    sub: req.auth?.sub || null,
-    scope: req.auth?.scp || null,
-    iss: req.auth?.iss || null,
-    aud: req.auth?.aud || null,
-  });
-});
-
-// --- who am I / current status
-app.get('/api/users/me', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
-  const sub = req.auth?.sub || '';
-  if (!sub) return res.status(400).json({ error: 'missing_sub' });
-
-  const rows = await q<{ subject: string; email: string; display_name: string; status: string }>(
-    `select subject, email, display_name, status from app_user where subject=$1`,
-    [sub]
-  );
-
-  if (!rows.length) return res.status(404).json({ error: 'not_found' });
-  res.json(rows[0]);
-});
-
-// ---- 404
+// ----------------------
+// 404 + global error
+// ----------------------
 app.use((_req: Request, res: Response) => res.status(404).json({ error: 'not_found' }));
 
-// ---- last middleware: global error handler that still adds CORS
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
-  // eslint-disable-next-line no-console
+// final error handler (adds CORS if needed)
+app.use((err: unknown, req: Request, res: Response, _next: Function) => {
   console.error('ERROR:', err);
-
   if (!res.headersSent) {
     const origin = String(req.headers.origin || '');
-    if (isAllowedOrigin(origin)) {
-      res.setHeader('Vary', 'Origin');
+    res.setHeader('Vary', 'Origin');
+    const allowed = isAllowedOrigin(origin);
+    if (allowed) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
     }
   }
-
   const status = (err as { status?: number }).status ?? 500;
   res.status(status).json({ error: 'server_error' });
 });
 
-app.get('/api/whoami', verifyBearer, (req: AuthenticatedRequest, res: Response) => {
-  res.json({
-    sub: req.auth?.sub,
-    preferred_username: req.auth?.preferred_username,
-    emails: (req.auth as any)?.emails,
-    name: req.auth?.name,
-    scp: req.auth?.scp,
-    iss: (req.auth as any)?.iss,
-    aud: (req.auth as any)?.aud,
-  });
-});
-
-// ---- start
+// ----------------------
+// Start
+// ----------------------
 const port = +(process.env.PORT || 8080);
-app.listen(port, () => console.log(`API listening on :${port}`));
+app.listen(port, () => {
+  console.log(`API listening on :${port}`);
+});
