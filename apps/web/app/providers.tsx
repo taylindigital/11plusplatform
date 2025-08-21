@@ -84,7 +84,7 @@ export default function Providers({ children }: { children: ReactNode }) {
       };
 
       // Debug aid in the console:
-      (window as any).__lastMsalCfg = {
+      window.__lastMsalCfg = {
         authority: config.auth.authority,
         metadataUrl: cfgPieces.metadataUrl,
         knownAuthorities: config.auth.knownAuthorities ?? [],
@@ -106,8 +106,8 @@ export default function Providers({ children }: { children: ReactNode }) {
       const accs = instance.getAllAccounts();
       if (accs.length > 0) setAccount(accs[0]);
 
-      (window as any).msalInstance = instance;
-      const last = (window as any).__lastMsalCfg;
+      window.msalInstance = instance;
+      const last = window.__lastMsalCfg;
       if (last) {
         last.account = accs[0]
           ? { username: accs[0].username, homeAccountId: accs[0].homeAccountId }
