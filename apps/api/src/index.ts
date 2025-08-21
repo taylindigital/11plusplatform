@@ -1,54 +1,48 @@
-import express, { type Request, type Response } from 'express';
-import cors, { CorsOptionsDelegate } from 'cors';
+import express, { type Request, type Response, type NextFunction } from 'express';
+import cors, { type CorsOptions } from 'cors';
 import morgan from 'morgan';
 import { verifyBearer, type AuthenticatedRequest } from './auth.js';
 import { q } from './db.js';
 
-// ---- create app FIRST
+// ---- create app FIRST - 20250821-09:19am version
 const app = express();
 
 // ---- config & middleware
 const SWA_ORIGIN = (process.env.SWA_ORIGIN || 'https://nice-ocean-0e8063c03.2.azurestaticapps.net').replace(/\/+$/, '');
-// We’ll allow the exact SWA origin, localhost (dev), and any *.azurestaticapps.net
-const isAllowedOrigin = (origin: string): boolean => {
+
+const isAllowedOrigin = (origin: string | undefined | null): boolean => {
   if (!origin) return false;
   const norm = origin.replace(/\/+$/, '');
   if (norm === SWA_ORIGIN) return true;
-  if (norm.startsWith('http://localhost:') || norm.startsWith('http://127.0.0.1:')) return true;
-
-  // cover SWA staging/preview hosts too
+  if (/^http:\/\/(localhost|127\.0\.0\.1):\d+$/i.test(norm)) return true;
   try {
     const host = new URL(norm).hostname.toLowerCase();
     if (host.endsWith('.azurestaticapps.net')) return true;
-  } catch {
-    // ignore bad origins
-  }
+  } catch { /* ignore */ }
   return false;
 };
 
-// dynamic origin check to avoid subtle string mismatches
-const corsOptions: CorsOptionsDelegate = (req, cb) => {
-  const origin = (req.headers['origin'] || '').toString();
-  const allowed = isAllowedOrigin(origin);
-  cb(null, {
-    origin: allowed ? origin : false,
-    credentials: false,
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Authorization', 'Content-Type'],
-    maxAge: 600,
-  });
+const corsOptions: CorsOptions = {
+  origin: (origin, cb) => cb(null, isAllowedOrigin(origin) ? origin : false),
+  credentials: false,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Authorization', 'Content-Type'],
+  optionsSuccessStatus: 204,
+  maxAge: 600,
 };
 
-app.use(cors({ origin: true, methods: ['GET','POST','OPTIONS'], allowedHeaders: ['Authorization','Content-Type'] }));
-app.options('*', cors({ origin: true }));
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
+app.use(express.json());
+app.use(morgan('tiny'));
+
 // ---- debug CORS endpoint
 app.get('/debug/cors', (req, res) => {
   const origin = (req.headers['origin'] || '').toString();
   res.json({ origin, SWA_ORIGIN, allowed: isAllowedOrigin(origin) });
 });
 
-app.use(express.json());
-app.use(morgan('tiny'));
 // ---- health endpoints
 app.get('/health', (_req: Request, res: Response) => res.json({ ok: true }));
 
@@ -71,17 +65,17 @@ app.get('/api/ping', verifyBearer, (req: AuthenticatedRequest, res: Response) =>
   });
 });
 
-// ---- users init/me
+// ---- users: init + me
 app.post('/api/users/init', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
   const sub = req.auth?.sub;
   const email = (req.auth?.preferred_username as string) || '';
-  const given = (req.auth as any)?.given_name as string | undefined;
-  const family = (req.auth as any)?.family_name as string | undefined;
+  const given = (req.auth as Record<string, unknown>)?.['given_name'] as string | undefined;
+  const family = (req.auth as Record<string, unknown>)?.['family_name'] as string | undefined;
   const fullFromParts = [given, family].filter(Boolean).join(' ').trim();
   const name =
     (req.auth?.name as string) ||
     fullFromParts ||
-    email.split('@')[0]; // last-resort: local part of email
+    email.split('@')[0];
 
   if (!sub || !email) return res.status(400).json({ error: 'missing_claims' });
 
@@ -93,7 +87,7 @@ app.post('/api/users/init', verifyBearer, async (req: AuthenticatedRequest, res:
       email = excluded.email,
       display_name = excluded.display_name,
       updated_at = now()
-  `,
+    `,
     [sub, email, name],
   );
 
@@ -105,6 +99,17 @@ app.post('/api/users/init', verifyBearer, async (req: AuthenticatedRequest, res:
 
   const [me] = await q<{ status: string }>(`select status from app_user where subject=$1`, [sub]);
   res.json({ ok: true, status: me?.status || 'pending' });
+});
+
+app.get('/api/users/me', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
+  const sub = req.auth?.sub;
+  if (!sub) return res.status(401).json({ error: 'missing_claims' });
+  const rows = await q<{ subject: string; email: string; display_name: string; status: string }>(
+    `select subject, email, display_name, status from app_user where subject=$1`,
+    [sub],
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'not_found' });
+  res.json(rows[0]);
 });
 
 // ---- admin approve/reject (email guard for now)
@@ -130,7 +135,6 @@ app.post('/api/admin/users/:subject/reject', verifyBearer, async (req: Authentic
   res.json({ ok: true });
 });
 
-// Admin: list users (optionally filter by status)
 app.get('/api/admin/users', verifyBearer, async (req: AuthenticatedRequest, res: Response) => {
   if ((req.auth?.preferred_username || '').toLowerCase() !== ADMIN_EMAIL) {
     return res.status(403).json({ error: 'forbidden' });
@@ -149,35 +153,22 @@ app.get('/api/admin/users', verifyBearer, async (req: AuthenticatedRequest, res:
          order by created_at desc limit 200`,
       );
 
-  res.json({ ok: true, users: rows }); // ← wrap here
+  res.json({ ok: true, users: rows });
 });
 
 // ---- 404
 app.use((_req: Request, res: Response) => res.status(404).json({ error: 'not_found' }));
 
-// ---- start
-const port = +(process.env.PORT || 8080);
-// --- last middleware: global error handler that still adds CORS headers
+// ---- last middleware: global error handler that still adds CORS
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-app.use((err: unknown, req: Request, res: Response, _next: Function) => {
-  // Log for diagnostics
+app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
   // eslint-disable-next-line no-console
   console.error('ERROR:', err);
 
-  // If we haven't sent headers yet, make sure CORS headers are present
   if (!res.headersSent) {
     const origin = String(req.headers.origin || '');
-    res.setHeader('Vary', 'Origin');
-    // Use the same allow logic as your CORS middleware
-    const isAllowed =
-      origin === SWA_ORIGIN ||
-      /^http:\/\/(localhost|127\.0\.0\.1):\d+$/i.test(origin) ||
-      (() => {
-        try { return new URL(origin).hostname.toLowerCase().endsWith('.azurestaticapps.net'); }
-        catch { return false; }
-      })();
-
-    if (isAllowed) {
+    if (isAllowedOrigin(origin)) {
+      res.setHeader('Vary', 'Origin');
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
@@ -187,7 +178,7 @@ app.use((err: unknown, req: Request, res: Response, _next: Function) => {
   const status = (err as { status?: number }).status ?? 500;
   res.status(status).json({ error: 'server_error' });
 });
-app.listen(port, () => {
-  // eslint-disable-next-line no-console
-  console.log(`API listening on :${port}`);
-});
+
+// ---- start
+const port = +(process.env.PORT || 8080);
+app.listen(port, () => console.log(`API listening on :${port}`));
