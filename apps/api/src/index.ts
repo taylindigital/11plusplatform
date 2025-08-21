@@ -250,6 +250,48 @@ app.get('/api/admin/users', verifyBearer, async (req: AuthenticatedRequest, res:
   res.json({ ok: true, users: rows });
 });
 
+// ===== DEBUG: token reachability & claims (remove after debugging) =====
+
+// Is the Authorization header arriving at the app at all?
+app.get('/debug/echo', (req: Request, res: Response) => {
+  const auth = (req.headers.authorization || '').toString();
+  res.json({
+    ok: true,
+    origin: (req.headers.origin || '').toString(),
+    hasAuthHeader: Boolean(auth),
+    authPrefix: auth ? auth.slice(0, 16) + '…' : '',
+    method: req.method,
+  });
+});
+
+// Peek at claims WITHOUT verifying signature (debug only)
+app.get('/debug/peek', (req: Request, res: Response) => {
+  const auth = (req.headers.authorization || '').toString();
+  const token = auth.replace(/^Bearer\s+/i, '');
+  const parts = token.split('.');
+  let claims: Record<string, unknown> | null = null;
+
+  try {
+    if (parts.length === 3) {
+      const json = Buffer.from(parts[1], 'base64url').toString('utf8');
+      claims = JSON.parse(json);
+    }
+  } catch {
+    // ignore – will return claims: null
+  }
+
+  res.json({
+    ok: true,
+    hasToken: Boolean(token),
+    aud: claims && (claims['aud'] as string | undefined),
+    preferred_username: claims && (claims['preferred_username'] as string | undefined),
+    name: claims && (claims['name'] as string | undefined),
+    scp: claims && (claims['scp'] as string | undefined),
+    // full claims if you need them:
+    // claims,
+  });
+});
+
 /* -----------------------------------------------------------------------------
    404 + error handler
 ----------------------------------------------------------------------------- */
