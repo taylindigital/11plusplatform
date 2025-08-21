@@ -6,7 +6,6 @@ import {
   type AccountInfo,
   type Configuration,
   type RedirectRequest,
-  type SilentRequest,
 } from '@azure/msal-browser';
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 
@@ -65,12 +64,11 @@ export default function Providers({ children }: { children: ReactNode }) {
 
     const init = async () => {
       let authorityMetadata: string | undefined;
-
       try {
         const res = await fetch(cfgPieces.metadataUrl, { cache: 'no-store', mode: 'cors' });
         if (res.ok) authorityMetadata = await res.text();
       } catch {
-        // ignore; MSAL will try itself if needed
+        // ok—MSAL can still discover endpoints itself
       }
 
       const config: Configuration = {
@@ -85,7 +83,8 @@ export default function Providers({ children }: { children: ReactNode }) {
         cache: { cacheLocation: 'localStorage' },
       };
 
-      window.__lastMsalCfg = {
+      // Debug aid in the console:
+      (window as any).__lastMsalCfg = {
         authority: config.auth.authority,
         metadataUrl: cfgPieces.metadataUrl,
         knownAuthorities: config.auth.knownAuthorities ?? [],
@@ -101,15 +100,16 @@ export default function Providers({ children }: { children: ReactNode }) {
         const result = await instance.handleRedirectPromise();
         if (result?.account) setAccount(result.account);
       } catch {
-        // swallow
+        // ignore
       }
 
       const accs = instance.getAllAccounts();
       if (accs.length > 0) setAccount(accs[0]);
 
-      window.msalInstance = instance;
-      if (window.__lastMsalCfg) {
-        window.__lastMsalCfg.account = accs[0]
+      (window as any).msalInstance = instance;
+      const last = (window as any).__lastMsalCfg;
+      if (last) {
+        last.account = accs[0]
           ? { username: accs[0].username, homeAccountId: accs[0].homeAccountId }
           : null;
       }
@@ -123,7 +123,7 @@ export default function Providers({ children }: { children: ReactNode }) {
   const login = async () => {
     if (!msal) return;
     const req: RedirectRequest = {
-      // Minimal scope for sign-in; we’ll request API scopes later when needed
+      // Minimal scope for interactive sign-in; API scopes can be requested later.
       scopes: ['openid'],
       redirectUri: cfgPieces.redirectUri,
     };
