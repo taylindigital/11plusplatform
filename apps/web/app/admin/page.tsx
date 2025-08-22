@@ -32,16 +32,13 @@ const toMessage = (err: unknown): string => {
 
 declare global {
   interface Window {
+    // __env is declared globally elsewhere as Record<string, string> | undefined
+    // so don't narrow it here — just add msalInstance (same type as global.d.ts)
     msalInstance?: PublicClientApplication;
-    __env?: {
-      NEXT_PUBLIC_API_BASE?: string;
-      NEXT_PUBLIC_API_SCOPE?: string;
-      NEXT_PUBLIC_ADMIN_EMAIL?: string;
-    };
   }
 }
 
-function getEnvString(key: keyof NonNullable<typeof window.__env>, fallback = ''): string {
+function getEnvString(key: string, fallback = ''): string {
   if (typeof window !== 'undefined' && window.__env && typeof window.__env[key] === 'string') {
     return window.__env[key] as string;
   }
