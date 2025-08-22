@@ -16,9 +16,6 @@ import {
   type RedirectRequest,
 } from '@azure/msal-browser';
 
-//
-// Auth context types
-//
 type AuthContextValue = {
   ready: boolean;
   msal?: PublicClientApplication;
@@ -39,49 +36,69 @@ export function useAuth(): AuthContextValue {
   return useContext(AuthContext);
 }
 
-//
-// Helpers to read public env at runtime (from SWA-injected window.__env or from build-time process.env)
-//
+// Read public runtime env (SWA injects window.__env) or build-time process.env
 function readPublicEnv(key: string): string | undefined {
-  if (typeof window !== 'undefined' && (window as unknown as { __env?: Record<string, string> }).__env) {
-    const v = (window as unknown as { __env: Record<string, string> }).__env[key];
-    if (typeof v === 'string' && v.length > 0) return v;
+  if (typeof window !== 'undefined') {
+    const w = window as unknown as { __env?: Record<string, string> };
+    if (w.__env && typeof w.__env[key] === 'string' && w.__env[key]) {
+      return w.__env[key];
+    }
   }
   const v = process.env[key];
-  if (typeof v === 'string' && v.length > 0) return v;
-  return undefined;
+  return typeof v === 'string' && v ? v : undefined;
+}
+
+function normalizeBase(urlLike: string): string {
+  const trimmed = urlLike.trim();
+  // If it doesn't start with http(s), prefix https://
+  const withProto = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  // Drop trailing slashes
+  return withProto.replace(/\/+$/, '');
 }
 
 function buildMsalConfiguration(): {
   cfg: Configuration;
   redirectUri: string;
   apiScope: string;
+  authorityOk: boolean;
 } {
   const tenantId = readPublicEnv('NEXT_PUBLIC_CIAM_TENANT_ID') ?? '';
   const domain = readPublicEnv('NEXT_PUBLIC_CIAM_DOMAIN') ?? '';
   const userFlow = readPublicEnv('NEXT_PUBLIC_CIAM_USER_FLOW') ?? 'SignUpSignIn';
   const clientId = readPublicEnv('NEXT_PUBLIC_CIAM_CLIENT_ID') ?? '';
-  const authorityBase =
-    readPublicEnv('NEXT_PUBLIC_CIAM_AUTHORITY') ??
-    (tenantId ? `https://${domain}/${tenantId}` : '');
-  const metadataUrl = readPublicEnv('NEXT_PUBLIC_CIAM_METADATA_URL'); // optional, good to have
+  const providedAuthority = readPublicEnv('NEXT_PUBLIC_CIAM_AUTHORITY') ?? '';
+  const metadataUrlRaw = readPublicEnv('NEXT_PUBLIC_CIAM_METADATA_URL'); // optional
   const redirectUri =
-    readPublicEnv('NEXT_PUBLIC_REDIRECT_URI') ?? (typeof window !== 'undefined' ? window.location.origin + '/' : '/');
+    readPublicEnv('NEXT_PUBLIC_REDIRECT_URI') ??
+    (typeof window !== 'undefined' ? window.location.origin + '/' : '/');
   const apiScope = readPublicEnv('NEXT_PUBLIC_API_SCOPE') ?? '';
 
-  const authority = authorityBase.replace(/\/+$/, '') + `/${userFlow}/v2.0`;
+  // Build authority base
+  let base = providedAuthority || (domain && tenantId ? `${domain}/${tenantId}` : '');
+  if (base) {
+    base = normalizeBase(base);
+  }
 
-  // Known authorities: B2C/CIAM domains you trust
-  const ka: string[] = [];
-  if (domain) ka.push(domain);
-  if (tenantId) ka.push(`${tenantId}.ciamlogin.com`);
+  // Append /{userflow}/v2.0 exactly once
+  let authority = '';
+  if (base) {
+    const endsWithFlow =
+      new RegExp(`/${userFlow}/v2\\.0$`, 'i').test(base) ||
+      /\/v2\.0$/i.test(base); // if someone already appended v2.0
+    authority = endsWithFlow ? base : `${base}/${userFlow}/v2.0`;
+  }
+
+  const authorityOk = /^https?:\/\/[^/]+\/.+\/v2\.0$/i.test(authority);
 
   const cfg: Configuration = {
     auth: {
       clientId,
-      authority,
-      knownAuthorities: ka,
-      authorityMetadata: metadataUrl,
+      authority: authorityOk ? authority : undefined, // avoid passing a bad URL
+      knownAuthorities: [
+        ...(domain ? [domain] : []),
+        ...(tenantId ? [`${tenantId}.ciamlogin.com`] : []),
+      ],
+      authorityMetadata: (metadataUrlRaw || '').trim() || undefined,
       redirectUri,
       navigateToLoginRequestUrl: true,
     },
@@ -91,49 +108,63 @@ function buildMsalConfiguration(): {
     },
   };
 
-  return { cfg, redirectUri, apiScope };
+  // Helpful console output once per build
+  if (typeof window !== 'undefined') {
+    // eslint-disable-next-line no-console
+    console.log('[MSAL cfg]', {
+      clientIdPresent: !!clientId,
+      authority,
+      authorityOk,
+      metadataUrl: cfg.auth.authorityMetadata,
+      redirectUri,
+      apiScope,
+    });
+  }
+
+  return { cfg, redirectUri, apiScope, authorityOk };
 }
 
-//
-// Provider
-//
 export default function Providers({ children }: { children: ReactNode }) {
-  const [{ cfg, redirectUri, apiScope }] = useState(buildMsalConfiguration);
+  const [{ cfg, redirectUri, apiScope, authorityOk }] = useState(buildMsalConfiguration);
   const [msal, setMsal] = useState<PublicClientApplication | undefined>(undefined);
   const [account, setAccount] = useState<AccountInfo | undefined>(undefined);
   const [ready, setReady] = useState(false);
 
-  // Initialize MSAL once
   useEffect(() => {
     const app = new PublicClientApplication(cfg);
     void app.initialize().then(() => {
       setMsal(app);
-
-      // Complete any pending redirect flow
       app
         .handleRedirectPromise()
         .then((result) => {
-          if (result && result.account) {
+          if (result?.account) {
             setAccount(result.account);
           } else {
             const accts = app.getAllAccounts();
             if (accts.length > 0) setAccount(accts[0]);
           }
         })
-        .finally(() => {
-          setReady(true);
-        });
+        .finally(() => setReady(true));
     });
   }, [cfg]);
 
   const login = useCallback(async () => {
     if (!msal) return;
+    if (!authorityOk || !cfg.auth.clientId) {
+      // eslint-disable-next-line no-console
+      console.error('MSAL login blocked: invalid config', {
+        authority: cfg.auth.authority,
+        clientIdPresent: !!cfg.auth.clientId,
+      });
+      alert('Sign-in is not configured correctly. Check authority/clientId.');
+      return;
+    }
     const req: RedirectRequest = {
       scopes: apiScope ? [apiScope] : [],
       redirectUri,
     };
     await msal.loginRedirect(req);
-  }, [msal, apiScope, redirectUri]);
+  }, [msal, cfg.auth.authority, cfg.auth.clientId, apiScope, redirectUri, authorityOk]);
 
   const logout = useCallback(async () => {
     if (!msal) return;
