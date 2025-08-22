@@ -8,6 +8,28 @@ import {
 let instance: PublicClientApplication | null = null;
 let readyPromise: Promise<void> | null = null;
 
+function buildAuthority(): string {
+  // Example envs:
+  // NEXT_PUBLIC_CIAM_AUTHORITY = "https://11plusdevuks.ciamlogin.com/662ecf18-5239-4e7f-b4bd-a0d8e32d1026/v2.0"
+  // NEXT_PUBLIC_CIAM_USER_FLOW = "SignUpSignIn"
+  const base = (process.env.NEXT_PUBLIC_CIAM_AUTHORITY ?? '').replace(/\/+$/, '');
+  const userFlow = process.env.NEXT_PUBLIC_CIAM_USER_FLOW ?? 'SignUpSignIn';
+
+  if (!base) throw new Error('Missing NEXT_PUBLIC_CIAM_AUTHORITY');
+
+  // If base ends with /v2.0, move it AFTER the user flow:
+  // - from: ".../<tenant>/v2.0"
+  // - to:   ".../<tenant>/<userFlow>/v2.0"
+  const v2 = /\/v2\.0$/i;
+  if (v2.test(base)) {
+    const withoutV2 = base.replace(v2, '');
+    return `${withoutV2}/${userFlow}/v2.0`;
+  }
+
+  // If base did not include v2.0, append correctly.
+  return `${base}/${userFlow}/v2.0`;
+}
+
 /** Build the singleton (do not use it until ensureMsalReady() resolves). */
 function createMsal(): PublicClientApplication {
   if (typeof window === 'undefined') {
@@ -15,12 +37,16 @@ function createMsal(): PublicClientApplication {
   }
 
   const clientId = process.env.NEXT_PUBLIC_CIAM_CLIENT_ID ?? '';
-  const authorityBase = process.env.NEXT_PUBLIC_CIAM_AUTHORITY ?? '';
-  const userFlow = process.env.NEXT_PUBLIC_CIAM_USER_FLOW ?? 'SignUpSignIn';
-  const authority = `${authorityBase}/${userFlow}`;
-
+  const authority = buildAuthority();
   const redirectUri = process.env.NEXT_PUBLIC_REDIRECT_URI ?? window.location.origin;
-  const knownAuthorities = [process.env.NEXT_PUBLIC_CIAM_DOMAIN ?? ''];
+
+  // Domain host (e.g. "11plusdevuks.ciamlogin.com")
+  const knownDomain = process.env.NEXT_PUBLIC_CIAM_DOMAIN ?? '';
+  const knownAuthorities = knownDomain ? [knownDomain] : [];
+
+  // Log once for sanity
+  // eslint-disable-next-line no-console
+  console.log('[MSAL auth cfg]', { clientIdPresent: Boolean(clientId), authority, knownAuthorities, redirectUri });
 
   return new PublicClientApplication({
     auth: { clientId, authority, redirectUri, knownAuthorities },
@@ -31,7 +57,6 @@ function createMsal(): PublicClientApplication {
 export function getMsal(): PublicClientApplication {
   if (!instance) {
     instance = createMsal();
-    // for console debugging
     (window as Window & { msalInstance?: PublicClientApplication }).msalInstance = instance;
   }
   return instance;
@@ -43,10 +68,8 @@ export async function ensureMsalReady(): Promise<PublicClientApplication> {
 
   if (!readyPromise) {
     readyPromise = (async () => {
-      // v3 requirement
-      await msal.initialize();
+      await msal.initialize(); // v3 requirement
 
-      // Finish any pending redirect and set active account
       try {
         const result = await msal.handleRedirectPromise();
         if (result?.account) {
@@ -66,7 +89,6 @@ export async function ensureMsalReady(): Promise<PublicClientApplication> {
   return msal;
 }
 
-/** Get the current account after init; sets one active if available. */
 export async function getActiveAccount(): Promise<AccountInfo | null> {
   const msal = await ensureMsalReady();
   let acc = msal.getActiveAccount();
@@ -76,7 +98,6 @@ export async function getActiveAccount(): Promise<AccountInfo | null> {
   return acc;
 }
 
-/** Acquire an API access token (after init). */
 export async function getApiToken(): Promise<string> {
   const msal = await ensureMsalReady();
   const account = await getActiveAccount();
@@ -94,12 +115,10 @@ export async function getApiToken(): Promise<string> {
   return accessToken;
 }
 
-/** Login flow */
 export async function login(): Promise<void> {
   const msal = await ensureMsalReady();
   const redirectUri = process.env.NEXT_PUBLIC_REDIRECT_URI ?? window.location.origin;
 
-  // Scopes can be empty for login, but passing API scope helps warm the cache
   const scope =
     process.env.NEXT_PUBLIC_API_SCOPE ??
     'api://api-11plusplatform-dev/access_as_user';
@@ -110,7 +129,6 @@ export async function login(): Promise<void> {
   });
 }
 
-/** Logout flow */
 export async function logout(): Promise<void> {
   const msal = await ensureMsalReady();
   await msal.logoutRedirect({
