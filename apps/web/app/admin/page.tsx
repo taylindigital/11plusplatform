@@ -1,9 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { AccountInfo, PublicClientApplication } from '@azure/msal-browser';
+import React, { useEffect, useMemo, useState } from 'react';
 
-type User = {
+// ---------- Types ----------
+type UserRow = {
   subject: string;
   email: string;
   display_name: string;
@@ -12,258 +12,197 @@ type User = {
   updated_at?: string;
 };
 
-type ApiUsersResponse =
-  | { ok: true; users: User[] }
-  | { ok: false; error: string };
+type UsersResponse = { ok: true; users: UserRow[] } | { ok: false; error: string };
 
-type ApiSimpleOk = { ok: true } | { ok: false; error: string };
-
-// ---- helpers
-
-const toMessage = (err: unknown): string => {
-  if (err instanceof Error) return err.message;
-  if (typeof err === 'string') return err;
-  try {
-    return JSON.stringify(err);
-  } catch {
-    return 'Unknown error';
+// ---------- Helpers ----------
+function readEnv(key: string, fallback = ''): string {
+  // Prefer runtime window.__env if present
+  if (typeof window !== 'undefined') {
+    const env = (window as any).__env as Record<string, string> | undefined;
+    if (env && typeof env[key] === 'string') return env[key]!;
   }
-};
-
-declare global {
-  interface Window {
-    // __env is declared globally elsewhere as Record<string, string> | undefined
-    // so don't narrow it here — just add msalInstance (same type as global.d.ts)
-    msalInstance?: PublicClientApplication;
-  }
+  // Build-time fallback (Next replaces NEXT_PUBLIC_* at build time)
+  const val = (process.env as Record<string, string | undefined>)[key];
+  return typeof val === 'string' ? val : fallback;
 }
 
-function getEnvString(key: string, fallback = ''): string {
-  if (typeof window !== 'undefined' && window.__env && typeof window.__env[key] === 'string') {
-    return window.__env[key] as string;
-  }
-  return fallback;
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : 'Unknown error';
 }
 
-async function getApiToken(scope: string): Promise<string> {
-  const msal = window.msalInstance;
-  if (!msal) throw new Error('MSAL not initialised');
-  const accounts: AccountInfo[] = msal.getAllAccounts();
-  const account = accounts[0];
-  if (!account) throw new Error('No MSAL account (not signed in?)');
+// ---------- Component ----------
+export default function AdminPage(): React.ReactElement {
+  // Read config once
+  const API_BASE = useMemo(() => readEnv('NEXT_PUBLIC_API_BASE', ''), []);
+  const SCOPE = useMemo(() => readEnv('NEXT_PUBLIC_API_SCOPE', ''), []);
+  const ADMIN_EMAIL = useMemo(() => readEnv('NEXT_PUBLIC_ADMIN_EMAIL', ''), []);
 
-  const { accessToken } = await msal.acquireTokenSilent({
-    account,
-    scopes: [scope],
-  });
-  return accessToken;
-}
+  const [statusFilter, setStatusFilter] = useState<'pending' | 'approved' | 'rejected'>('pending');
+  const [rows, setRows] = useState<UserRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string>('');
 
-// ---- component
-
-export default function AdminPage() {
-  const [users, setUsers] = useState<User[]>([]);
-  const [statusFilter, setStatusFilter] = useState<'pending' | 'approved' | 'rejected' | ''>('pending');
-  const [loading, setLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const apiBase = useMemo(
-    () => getEnvString('NEXT_PUBLIC_API_BASE', ''),
-    [],
-  );
-  const scope = useMemo(
-    () => getEnvString('NEXT_PUBLIC_API_SCOPE', ''),
-    [],
-  );
-  const adminEmail = useMemo(
-    () => getEnvString('NEXT_PUBLIC_ADMIN_EMAIL', ''),
-    [],
-  );
-
-  const fetchUsers = useCallback(async () => {
+  // Fetch users
+  const fetchUsers = async () => {
+    setError('');
     setLoading(true);
-    setError(null);
     try {
-      if (!apiBase) throw new Error('API base missing');
-      if (!scope) throw new Error('API scope missing');
+      if (!API_BASE) throw new Error('API base missing');
+      if (!SCOPE) throw new Error('API scope missing');
 
-      const token = await getApiToken(scope);
-      const url = new URL('/api/admin/users', apiBase);
-      if (statusFilter) url.searchParams.set('status', statusFilter);
+      const msal = (window as any).msalInstance;
+      if (!msal) throw new Error('MSAL not initialized (are you signed in?)');
 
-      const res = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${token}` },
+      const account = msal.getAllAccounts()[0];
+      if (!account) throw new Error('No MSAL account found');
+
+      const { accessToken } = await msal.acquireTokenSilent({
+        account,
+        scopes: [SCOPE],
       });
 
-      if (!res.ok) {
-        const bodyText = await res.text().catch(() => '');
-        throw new Error(`Fetch users failed (${res.status}): ${bodyText || res.statusText}`);
-      }
+      const res = await fetch(
+        `${API_BASE}/api/admin/users?status=${encodeURIComponent(statusFilter)}`,
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
 
-      const data: ApiUsersResponse = await res.json();
-      if (!('ok' in data) || !data.ok) {
-        throw new Error(data?.error || 'Unknown API error');
+      if (res.status === 403) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(
+          body?.error === 'forbidden_not_admin'
+            ? 'Forbidden: this user is not the ADMIN'
+            : `Forbidden (403)`,
+        );
       }
+      if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
 
-      setUsers(data.users);
+      const data = (await res.json()) as UsersResponse;
+      if (!('ok' in data) || !data.ok) throw new Error((data as any)?.error ?? 'Bad response');
+
+      setRows(data.users ?? []);
     } catch (e) {
-      setError(toMessage(e));
-      setUsers([]);
+      setError(errMsg(e));
+      setRows([]);
     } finally {
       setLoading(false);
     }
-  }, [apiBase, scope, statusFilter]);
+  };
 
+  // Approve / reject
+  const updateStatus = async (subject: string, action: 'approve' | 'reject') => {
+    setError('');
+    try {
+      if (!API_BASE) throw new Error('API base missing');
+      if (!SCOPE) throw new Error('API scope missing');
+
+      const msal = (window as any).msalInstance;
+      if (!msal) throw new Error('MSAL not initialized');
+
+      const account = msal.getAllAccounts()[0];
+      if (!account) throw new Error('No MSAL account found');
+
+      const { accessToken } = await msal.acquireTokenSilent({
+        account,
+        scopes: [SCOPE],
+      });
+
+      const res = await fetch(`${API_BASE}/api/admin/users/${encodeURIComponent(subject)}/${action}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(`Action failed (${res.status}): ${txt || res.statusText}`);
+      }
+
+      await fetchUsers();
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  };
+
+  // Load on mount & when filter changes
   useEffect(() => {
     void fetchUsers();
-  }, [fetchUsers]);
-
-  const approve = useCallback(
-    async (subject: string) => {
-      setError(null);
-      try {
-        if (!apiBase) throw new Error('API base missing');
-        if (!scope) throw new Error('API scope missing');
-        const token = await getApiToken(scope);
-
-        const res = await fetch(`${apiBase}/api/admin/users/${encodeURIComponent(subject)}/approve`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
-        });
-
-        if (!res.ok) {
-          const bodyText = await res.text().catch(() => '');
-          throw new Error(`Approve failed (${res.status}): ${bodyText || res.statusText}`);
-        }
-
-        const data: ApiSimpleOk = await res.json();
-        if (!('ok' in data) || !data.ok) {
-          throw new Error(data?.error || 'Approve failed');
-        }
-
-        // refresh
-        void fetchUsers();
-      } catch (e) {
-        setError(toMessage(e));
-      }
-    },
-    [apiBase, scope, fetchUsers],
-  );
-
-  const reject = useCallback(
-    async (subject: string) => {
-      setError(null);
-      try {
-        if (!apiBase) throw new Error('API base missing');
-        if (!scope) throw new Error('API scope missing');
-        const token = await getApiToken(scope);
-
-        const res = await fetch(`${apiBase}/api/admin/users/${encodeURIComponent(subject)}/reject`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
-        });
-
-        if (!res.ok) {
-          const bodyText = await res.text().catch(() => '');
-          throw new Error(`Reject failed (${res.status}): ${bodyText || res.statusText}`);
-        }
-
-        const data: ApiSimpleOk = await res.json();
-        if (!('ok' in data) || !data.ok) {
-          throw new Error(data?.error || 'Reject failed');
-        }
-
-        // refresh
-        void fetchUsers();
-      } catch (e) {
-        setError(toMessage(e));
-      }
-    },
-    [apiBase, scope, fetchUsers],
-  );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusFilter]);
 
   return (
-    <main className="max-w-3xl mx-auto p-6">
+    <main className="max-w-3xl mx-auto p-6 space-y-6">
       <h1 className="text-2xl font-bold">Admin</h1>
 
-      <div className="mt-2 text-sm text-gray-600">
-        <div><strong>Admin email (env):</strong> {adminEmail || '(not set)'}</div>
-        <div><strong>API base:</strong> {apiBase || '(missing)'}</div>
-        <div><strong>Scope:</strong> {scope || '(missing)'}</div>
+      <div className="rounded border p-4 text-sm">
+        <div>
+          <strong>Admin email (env):</strong>{' '}
+          {ADMIN_EMAIL || <span className="text-red-600">(not set)</span>}
+        </div>
+        <div>
+          <strong>API base:</strong>{' '}
+          {API_BASE ? API_BASE : <span className="text-red-600">(missing)</span>}
+        </div>
+        <div>
+          <strong>Scope:</strong>{' '}
+          {SCOPE ? SCOPE : <span className="text-red-600">(missing)</span>}
+        </div>
       </div>
 
-      <div className="mt-4 flex items-center gap-2">
+      <div className="flex items-center gap-3">
         <label className="text-sm">Filter:</label>
         <select
           className="border rounded px-2 py-1"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
         >
-          <option value="">All</option>
-          <option value="pending">Pending</option>
-          <option value="approved">Approved</option>
-          <option value="rejected">Rejected</option>
+          <option value="pending">pending</option>
+          <option value="approved">approved</option>
+          <option value="rejected">rejected</option>
         </select>
-
         <button
-          className="ml-2 px-3 py-1 rounded border"
           onClick={() => void fetchUsers()}
-          disabled={loading}
+          className="px-3 py-1 rounded bg-slate-700 text-white"
         >
           Refresh
         </button>
       </div>
 
       {error && (
-        <div className="mt-3 p-3 rounded bg-red-100 text-red-800">
+        <div className="p-3 rounded border border-red-300 bg-red-50 text-red-700 text-sm">
           {error}
         </div>
       )}
 
       {loading ? (
-        <p className="mt-4">Loading…</p>
-      ) : users.length === 0 ? (
-        <p className="mt-4">No users.</p>
+        <div>Loading…</div>
+      ) : rows.length === 0 ? (
+        <div className="text-sm">No users.</div>
       ) : (
-        <table className="mt-4 w-full text-sm border">
-          <thead>
-            <tr className="bg-gray-50 text-left">
-              <th className="p-2 border">Email</th>
-              <th className="p-2 border">Name</th>
-              <th className="p-2 border">Status</th>
-              <th className="p-2 border w-48">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {users.map(u => (
-              <tr key={u.subject}>
-                <td className="p-2 border">{u.email}</td>
-                <td className="p-2 border">{u.display_name}</td>
-                <td className="p-2 border">{u.status}</td>
-                <td className="p-2 border">
-                  <div className="flex gap-2">
-                    <button
-                      className="px-2 py-1 rounded border"
-                      onClick={() => void approve(u.subject)}
-                      disabled={loading || u.status === 'approved'}
-                      title="Approve"
-                    >
-                      Approve
-                    </button>
-                    <button
-                      className="px-2 py-1 rounded border"
-                      onClick={() => void reject(u.subject)}
-                      disabled={loading || u.status === 'rejected'}
-                      title="Reject"
-                    >
-                      Reject
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="space-y-3">
+          {rows.map((u) => (
+            <div key={u.subject} className="border rounded p-3 flex flex-col gap-1">
+              <div className="font-medium">{u.display_name || '(no name)'}</div>
+              <div className="text-sm text-gray-600">{u.email}</div>
+              <div className="text-xs">status: {u.status}</div>
+              <div className="flex gap-2 mt-2">
+                <button
+                  className="px-3 py-1 rounded bg-emerald-600 text-white"
+                  onClick={() => void updateStatus(u.subject, 'approve')}
+                >
+                  Approve
+                </button>
+                <button
+                  className="px-3 py-1 rounded bg-rose-600 text-white"
+                  onClick={() => void updateStatus(u.subject, 'reject')}
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
       )}
     </main>
   );
