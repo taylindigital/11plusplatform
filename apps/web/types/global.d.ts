@@ -3,6 +3,7 @@ import type { PublicClientApplication, AccountInfo } from '@azure/msal-browser';
 declare global {
   interface Window {
     msalInstance?: PublicClientApplication;
+    __env?: Record<string, string>;
     __lastMsalCfg?: {
       authority?: string;
       metadataUrl?: string;

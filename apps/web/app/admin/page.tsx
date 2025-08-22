@@ -1,13 +1,12 @@
+// apps/web/app/admin/page.tsx
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import type {
-  PublicClientApplication,
-  AccountInfo,
-  AuthenticationResult,
-} from '@azure/msal-browser';
+import Link from 'next/link';
+import type { AccountInfo } from '@azure/msal-browser';
 
-type ApiUser = {
+// Types for what the API returns
+type AdminUser = {
   subject: string;
   email: string;
   display_name: string;
@@ -16,170 +15,186 @@ type ApiUser = {
   updated_at: string;
 };
 
+type UsersResponse =
+  | { ok: true; users: AdminUser[] }
+  | { ok?: false; error?: string };
+
+function useEnv() {
+  // Read env exposed to the client (from SWA App Settings)
+  const apiBase =
+    window?.__env?.NEXT_PUBLIC_API_BASE ||
+    process.env.NEXT_PUBLIC_API_BASE ||
+    '';
+
+  const adminEmail =
+    window?.__env?.NEXT_PUBLIC_ADMIN_EMAIL ||
+    process.env.NEXT_PUBLIC_ADMIN_EMAIL ||
+    '';
+
+  const scope =
+    window?.__env?.NEXT_PUBLIC_API_SCOPE ||
+    process.env.NEXT_PUBLIC_API_SCOPE ||
+    '';
+
+  return { apiBase, adminEmail, scope };
+}
+
+async function getApiToken(scope: string): Promise<string> {
+  const msal = window.msalInstance;
+  if (!msal) throw new Error('MSAL instance missing on window');
+
+  const account = msal.getAllAccounts()[0] as AccountInfo | undefined;
+  if (!account) throw new Error('No MSAL account found (are you signed in?)');
+
+  const { accessToken } = await msal.acquireTokenSilent({
+    account,
+    scopes: [scope],
+  });
+  return accessToken;
+}
+
 export default function AdminPage() {
+  const { apiBase, adminEmail, scope } = useEnv();
+
   const [loading, setLoading] = useState(true);
-  const [users, setUsers] = useState<ApiUser[]>([]);
-  const [error, setError] = useState<string>('');
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [errMsg, setErrMsg] = useState<string>('');
+  const [actionBusy, setActionBusy] = useState<string>(''); // subject currently being updated
 
-  // NEXT_PUBLIC_* are inlined at build time on the client
-  const apiBase = useMemo(() => process.env.NEXT_PUBLIC_API_BASE || '', []);
-  const scope = useMemo(() => process.env.NEXT_PUBLIC_API_SCOPE || '', []);
-  const adminEmail = useMemo(
-    () => (process.env.NEXT_PUBLIC_ADMIN_EMAIL || '').toLowerCase(),
-    [],
-  );
-
-  const getMsal = (): PublicClientApplication => {
-    const inst = (window as unknown as {
-      msalInstance?: PublicClientApplication;
-    }).msalInstance;
-    if (!inst) throw new Error('MSAL not available on window');
-    return inst;
-  };
-
-  const getAccessToken = async (): Promise<string> => {
-    const msal = getMsal();
-    const accounts: AccountInfo[] = msal.getAllAccounts?.() || [];
-    if (!accounts.length) throw new Error('No MSAL account found');
-    if (!scope) throw new Error('NEXT_PUBLIC_API_SCOPE is missing');
-
-    const result: AuthenticationResult = await msal.acquireTokenSilent({
-      account: accounts[0],
-      scopes: [scope],
-    });
-    if (!result?.accessToken) throw new Error('No accessToken returned');
-    return result.accessToken;
-  };
-
-  const fetchPending = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const token = await getAccessToken();
-
-      // Optional: whoami sanity check (ignore errors)
-      try {
-        await fetch(`${apiBase}/debug/whoami`, {
-          headers: { Authorization: `Bearer ${token}` },
-          cache: 'no-store',
-        });
-      } catch {
-        /* ignore */
-      }
-
-      const res = await fetch(`${apiBase}/api/admin/users?status=pending`, {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: 'no-store',
-      });
-
-      if (res.status === 401) throw new Error('Unauthorized (401). Are you logged in?');
-      if (res.status === 403) throw new Error('Forbidden (403). This user is not the ADMIN.');
-      if (!res.ok) throw new Error(`API error: ${res.status}`);
-
-      const data = await res.json();
-      // API returns { ok: true, users: [...] }
-      const list: ApiUser[] = Array.isArray(data?.users) ? data.users : data;
-      setUsers(list);
-    } catch (e) {
-      setError((e as Error).message || String(e));
-      setUsers([]);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const headersMemo = useMemo(() => ({ 'Content-Type': 'application/json' }), []);
 
   useEffect(() => {
-    fetchPending();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    let cancelled = false;
+
+    async function load() {
+      try {
+        setLoading(true);
+        setErrMsg('');
+
+        if (!apiBase || !scope) {
+          throw new Error('Missing API base or scope');
+        }
+
+        const token = await getApiToken(scope);
+        const res = await fetch(`${apiBase}/api/admin/users?status=pending`, {
+          headers: { ...headersMemo, Authorization: `Bearer ${token}` },
+          mode: 'cors',
+        });
+
+        if (res.status === 403) {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          throw new Error(data?.error || 'Forbidden (not admin)');
+        }
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`Failed to load users (${res.status}): ${text}`);
+        }
+
+        const data = (await res.json()) as UsersResponse;
+        if (!('ok' in data) || !data.ok) {
+          throw new Error((data as { error?: string }).error || 'Unknown error');
+        }
+
+        if (!cancelled) setUsers(data.users);
+      } catch (e) {
+        if (!cancelled) setErrMsg((e as Error).message);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, scope, headersMemo]);
+
+  async function doAction(subject: string, action: 'approve' | 'reject') {
+    try {
+      setActionBusy(subject);
+      setErrMsg('');
+
+      const token = await getApiToken(scope);
+      const res = await fetch(`${apiBase}/api/admin/users/${encodeURIComponent(subject)}/${action}`, {
+        method: 'POST',
+        headers: { ...headersMemo, Authorization: `Bearer ${token}` },
+        mode: 'cors',
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`${action} failed (${res.status}): ${text}`);
+      }
+
+      // Optimistically remove from list (or you can re-fetch)
+      setUsers(prev => prev.filter(u => u.subject !== subject));
+    } catch (e) {
+      setErrMsg((e as Error).message);
+    } finally {
+      setActionBusy('');
+    }
+  }
 
   return (
-    <main className="p-6 max-w-3xl mx-auto">
-      <h1 className="text-2xl font-semibold mb-4">Admin</h1>
-
-      <div className="mb-4 text-sm space-y-1">
-        <div><strong>Admin email (env):</strong> {adminEmail || '(not set)'}</div>
-        <div><strong>API base:</strong> {apiBase}</div>
-        <div><strong>Scope:</strong> {scope}</div>
+    <main className="max-w-3xl mx-auto p-6">
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold">Admin</h1>
+        <p className="text-sm text-gray-600">
+          Admin email (env): <span className="font-mono">{adminEmail || '—'}</span>
+        </p>
+        <p className="text-sm text-gray-600">
+          API base: <span className="font-mono">{apiBase || '—'}</span>
+        </p>
+        <p className="text-sm text-gray-600">
+          Scope: <span className="font-mono">{scope || '—'}</span>
+        </p>
+        <p className="mt-2">
+          <Link href="/" className="underline">Back to home</Link>
+        </p>
       </div>
 
-      <button
-        className="px-3 py-2 rounded bg-gray-100 border mb-4"
-        onClick={fetchPending}
-      >
-        Refresh
-      </button>
-
       {loading && <p>Loading…</p>}
-      {error && <p className="text-red-600">Error: {error}</p>}
-
-      {!loading && !error && (
-        <div className="space-y-2">
-          {users.length === 0 ? (
-            <p>No pending users.</p>
-          ) : (
-            users.map((u) => (
-              <div key={u.subject} className="border rounded p-3">
-                <div><strong>{u.display_name || '(no name)'}</strong></div>
-                <div className="text-sm text-gray-600">{u.email}</div>
-                <div className="text-sm">Status: {u.status}</div>
-                <div className="mt-2 flex gap-2">
-                  <ApproveButton subject={u.subject} onDone={fetchPending} />
-                  <RejectButton subject={u.subject} onDone={fetchPending} />
-                </div>
-              </div>
-            ))
-          )}
+      {errMsg && (
+        <div className="mb-4 rounded border border-red-300 bg-red-50 p-3 text-red-800">
+          {errMsg}
         </div>
       )}
+
+      {!loading && !errMsg && users.length === 0 && (
+        <p className="text-gray-700">No pending users 🎉</p>
+      )}
+
+      <ul className="space-y-3">
+        {users.map(u => (
+          <li key={u.subject} className="rounded border p-3">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div>
+                <div className="font-medium">{u.display_name || '—'}</div>
+                <div className="text-sm text-gray-600">{u.email}</div>
+                <div className="text-xs text-gray-500">
+                  status: {u.status} • created: {new Date(u.created_at).toLocaleString()}
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  className="px-3 py-1 rounded bg-emerald-600 text-white disabled:opacity-50"
+                  onClick={() => doAction(u.subject, 'approve')}
+                  disabled={!!actionBusy}
+                >
+                  {actionBusy === u.subject ? '…' : 'Approve'}
+                </button>
+                <button
+                  className="px-3 py-1 rounded bg-rose-600 text-white disabled:opacity-50"
+                  onClick={() => doAction(u.subject, 'reject')}
+                  disabled={!!actionBusy}
+                >
+                  {actionBusy === u.subject ? '…' : 'Reject'}
+                </button>
+              </div>
+            </div>
+          </li>
+        ))}
+      </ul>
     </main>
-  );
-}
-
-function ApproveButton({ subject, onDone }: { subject: string; onDone: () => void }) {
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE || '';
-  const scope = process.env.NEXT_PUBLIC_API_SCOPE || '';
-
-  const doApprove = async () => {
-    const msal = (window as unknown as {
-      msalInstance?: PublicClientApplication;
-    }).msalInstance!;
-    const account = msal.getAllAccounts()[0];
-    const { accessToken } = await msal.acquireTokenSilent({ account, scopes: [scope] });
-    await fetch(`${apiBase}/api/admin/users/${encodeURIComponent(subject)}/approve`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    onDone();
-  };
-
-  return (
-    <button className="px-2 py-1 rounded bg-emerald-600 text-white" onClick={doApprove}>
-      Approve
-    </button>
-  );
-}
-
-function RejectButton({ subject, onDone }: { subject: string; onDone: () => void }) {
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE || '';
-  const scope = process.env.NEXT_PUBLIC_API_SCOPE || '';
-
-  const doReject = async () => {
-    const msal = (window as unknown as {
-      msalInstance?: PublicClientApplication;
-    }).msalInstance!;
-    const account = msal.getAllAccounts()[0];
-    const { accessToken } = await msal.acquireTokenSilent({ account, scopes: [scope] });
-    await fetch(`${apiBase}/api/admin/users/${encodeURIComponent(subject)}/reject`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    onDone();
-  };
-
-  return (
-    <button className="px-2 py-1 rounded bg-red-600 text-white" onClick={doReject}>
-      Reject
-    </button>
   );
 }
