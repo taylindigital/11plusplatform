@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
+import type { PublicClientApplication, AccountInfo } from '@azure/msal-browser';
 
 // ---------- Types ----------
 type UserRow = {
@@ -12,16 +13,21 @@ type UserRow = {
   updated_at?: string;
 };
 
-type UsersResponse = { ok: true; users: UserRow[] } | { ok: false; error: string };
+type UsersResponse =
+  | { ok: true; users: UserRow[] }
+  | { ok: false; error: string };
+
+interface WindowWithMsal extends Window {
+  msalInstance?: PublicClientApplication;
+  __env?: Record<string, string>;
+}
 
 // ---------- Helpers ----------
 function readEnv(key: string, fallback = ''): string {
-  // Prefer runtime window.__env if present
   if (typeof window !== 'undefined') {
-    const env = (window as any).__env as Record<string, string> | undefined;
+    const env = (window as WindowWithMsal).__env;
     if (env && typeof env[key] === 'string') return env[key]!;
   }
-  // Build-time fallback (Next replaces NEXT_PUBLIC_* at build time)
   const val = (process.env as Record<string, string | undefined>)[key];
   return typeof val === 'string' ? val : fallback;
 }
@@ -32,7 +38,6 @@ function errMsg(e: unknown): string {
 
 // ---------- Component ----------
 export default function AdminPage(): React.ReactElement {
-  // Read config once
   const API_BASE = useMemo(() => readEnv('NEXT_PUBLIC_API_BASE', ''), []);
   const SCOPE = useMemo(() => readEnv('NEXT_PUBLIC_API_SCOPE', ''), []);
   const ADMIN_EMAIL = useMemo(() => readEnv('NEXT_PUBLIC_ADMIN_EMAIL', ''), []);
@@ -50,10 +55,10 @@ export default function AdminPage(): React.ReactElement {
       if (!API_BASE) throw new Error('API base missing');
       if (!SCOPE) throw new Error('API scope missing');
 
-      const msal = (window as any).msalInstance;
+      const msal = (window as WindowWithMsal).msalInstance;
       if (!msal) throw new Error('MSAL not initialized (are you signed in?)');
 
-      const account = msal.getAllAccounts()[0];
+      const account: AccountInfo | undefined = msal.getAllAccounts()[0];
       if (!account) throw new Error('No MSAL account found');
 
       const { accessToken } = await msal.acquireTokenSilent({
@@ -61,25 +66,23 @@ export default function AdminPage(): React.ReactElement {
         scopes: [SCOPE],
       });
 
-      const res = await fetch(
-        `${API_BASE}/api/admin/users?status=${encodeURIComponent(statusFilter)}`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
-      );
+      const res = await fetch(`${API_BASE}/api/admin/users?status=${encodeURIComponent(statusFilter)}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
 
       if (res.status === 403) {
         const body = await res.json().catch(() => ({}));
         throw new Error(
           body?.error === 'forbidden_not_admin'
             ? 'Forbidden: this user is not the ADMIN'
-            : `Forbidden (403)`,
+            : `Forbidden (403)`
         );
       }
       if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
 
-      const data = (await res.json()) as UsersResponse;
-      if (!('ok' in data) || !data.ok) throw new Error((data as any)?.error ?? 'Bad response');
-
-      setRows(data.users ?? []);
+      const data: UsersResponse = await res.json();
+      if (!data.ok) throw new Error(data.error);
+      setRows(data.users);
     } catch (e) {
       setError(errMsg(e));
       setRows([]);
@@ -95,10 +98,10 @@ export default function AdminPage(): React.ReactElement {
       if (!API_BASE) throw new Error('API base missing');
       if (!SCOPE) throw new Error('API scope missing');
 
-      const msal = (window as any).msalInstance;
+      const msal = (window as WindowWithMsal).msalInstance;
       if (!msal) throw new Error('MSAL not initialized');
 
-      const account = msal.getAllAccounts()[0];
+      const account: AccountInfo | undefined = msal.getAllAccounts()[0];
       if (!account) throw new Error('No MSAL account found');
 
       const { accessToken } = await msal.acquireTokenSilent({
@@ -106,13 +109,16 @@ export default function AdminPage(): React.ReactElement {
         scopes: [SCOPE],
       });
 
-      const res = await fetch(`${API_BASE}/api/admin/users/${encodeURIComponent(subject)}/${action}`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      });
+      const res = await fetch(
+        `${API_BASE}/api/admin/users/${encodeURIComponent(subject)}/${action}`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
 
       if (!res.ok) {
         const txt = await res.text().catch(() => '');
@@ -125,7 +131,6 @@ export default function AdminPage(): React.ReactElement {
     }
   };
 
-  // Load on mount & when filter changes
   useEffect(() => {
     void fetchUsers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
