@@ -122,6 +122,78 @@ app.options('*', cors(corsOptions));
 app.use(express.json());
 app.use(morgan('tiny'));
 
+// ---- TEMP: minimal CORS so errors aren't masked (keep while debugging)
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+import { Client } from 'pg';
+
+// Safe way to read env and show a redacted view
+function getDbCfg() {
+  const host = process.env.PGHOST || '';
+  const port = +(process.env.PGPORT || 5432);
+  const database = process.env.PGDATABASE || '';
+  const user = process.env.PGUSER || '';
+  const password = process.env.PGPASSWORD || '';
+  const sslmode = (process.env.PGSSLMODE || '').toLowerCase();
+
+  // Azure PG generally wants TLS; with public access use rejectUnauthorized:false
+  const ssl =
+    sslmode === 'require' || sslmode === 'on' || sslmode === 'verify-full'
+      ? { rejectUnauthorized: false }
+      : undefined;
+
+  return { host, port, database, user, password, sslmode, ssl };
+}
+
+// Shows what the server will try (no secrets leaked)
+app.get('/debug/dbcfg', (_req, res) => {
+  const cfg = getDbCfg();
+  res.json({
+    host: cfg.host,
+    port: cfg.port,
+    database: cfg.database,
+    user: cfg.user,
+    sslmode: cfg.sslmode,
+    sslEnabled: Boolean(cfg.ssl),
+    // NOTE: not returning password
+  });
+});
+
+// Actually try a direct connection and report the raw PG error
+app.get('/debug/db-try', async (_req, res) => {
+  const cfg = getDbCfg();
+  const client = new Client({
+    host: cfg.host,
+    port: cfg.port,
+    database: cfg.database,
+    user: cfg.user,
+    password: cfg.password,
+    ssl: cfg.ssl,
+  });
+
+  try {
+    await client.connect();
+    const { rows } = await client.query('select now() as now, current_user as usr');
+    await client.end();
+    res.json({ ok: true, rows });
+  } catch (e: any) {
+    res.status(500).json({
+      ok: false,
+      name: e?.name,
+      code: e?.code,            // e.g. 28P01, ECONNREFUSED, ETIMEDOUT
+      message: e?.message,
+      detail: e?.detail ?? null,
+      hint: e?.hint ?? null,
+    });
+  }
+});
+
 /* -----------------------------------------------------------------------------
    Debug endpoints
 ----------------------------------------------------------------------------- */
