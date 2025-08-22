@@ -1,150 +1,71 @@
 'use client';
 
-import type { ReactNode } from 'react';
-import {
-  PublicClientApplication,
-  type AccountInfo,
-  type Configuration,
-  type RedirectRequest,
-} from '@azure/msal-browser';
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useContext, createContext } from 'react';
+import { PublicClientApplication, type Configuration, type AccountInfo } from '@azure/msal-browser';
 
-type AuthCtx = {
-  msal: PublicClientApplication | null;
+type AuthContextValue = {
   account: AccountInfo | null;
-  login: () => Promise<void>;
-  logout: () => Promise<void>;
+  login: () => void;
+  logout: () => void;
 };
 
-const AuthContext = createContext<AuthCtx>({
-  msal: null,
-  account: null,
-  login: async () => {},
-  logout: async () => {},
-});
+const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-function buildAuthority(tenantId: string, userFlow: string, domain: string) {
-  return `https://${domain}/${tenantId}/${userFlow}/v2.0`;
+export function useAuth() {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error('useAuth must be used inside <Providers>');
+  return ctx;
 }
 
-function buildMetadataUrl(tenantId: string, userFlow: string, domain: string) {
-  return `https://${domain}/${tenantId}/v2.0/.well-known/openid-configuration?p=${userFlow}`;
-}
+export default function Providers({ children }: { children: React.ReactNode }) {
+  const env = useMemo(
+    () => ({
+      NEXT_PUBLIC_CIAM_CLIENT_ID: process.env.NEXT_PUBLIC_CIAM_CLIENT_ID ?? '',
+      NEXT_PUBLIC_CIAM_AUTHORITY: process.env.NEXT_PUBLIC_CIAM_AUTHORITY ?? '',
+      NEXT_PUBLIC_REDIRECT_URI: process.env.NEXT_PUBLIC_REDIRECT_URI ?? '/',
+      NEXT_PUBLIC_POST_LOGOUT_REDIRECT_URI: process.env.NEXT_PUBLIC_POST_LOGOUT_REDIRECT_URI ?? '/',
+    }),
+    []
+  );
 
-export default function Providers({ children }: { children: ReactNode }) {
-  const [msal, setMsal] = useState<PublicClientApplication | null>(null);
   const [account, setAccount] = useState<AccountInfo | null>(null);
-
-  const cfgPieces = useMemo(() => {
-    const domain = process.env.NEXT_PUBLIC_CIAM_DOMAIN ?? '';
-    const tenantId = process.env.NEXT_PUBLIC_CIAM_TENANT_ID ?? '';
-    const userFlow = process.env.NEXT_PUBLIC_CIAM_USER_FLOW ?? 'SignUpSignIn';
-    const clientId = process.env.NEXT_PUBLIC_CIAM_CLIENT_ID ?? '';
-    const redirectUri = process.env.NEXT_PUBLIC_REDIRECT_URI ?? '/';
-    const postLogoutRedirectUri =
-      process.env.NEXT_PUBLIC_POST_LOGOUT_REDIRECT_URI ?? redirectUri;
-
-    const authority = buildAuthority(tenantId, userFlow, domain);
-    const metadataUrl = buildMetadataUrl(tenantId, userFlow, domain);
-
-    return {
-      domain,
-      tenantId,
-      userFlow,
-      clientId,
-      authority,
-      metadataUrl,
-      redirectUri,
-      postLogoutRedirectUri,
-    };
-  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    const init = async () => {
-      let authorityMetadata: string | undefined;
-      try {
-        const res = await fetch(cfgPieces.metadataUrl, { cache: 'no-store', mode: 'cors' });
-        if (res.ok) authorityMetadata = await res.text();
-      } catch {
-        // ok—MSAL can still discover endpoints itself
-      }
-
-      const config: Configuration = {
-        auth: {
-          clientId: cfgPieces.clientId,
-          authority: cfgPieces.authority,
-          knownAuthorities: [cfgPieces.domain, `${cfgPieces.tenantId}.ciamlogin.com`],
-          ...(authorityMetadata ? { authorityMetadata } : {}),
-          redirectUri: cfgPieces.redirectUri,
-          postLogoutRedirectUri: cfgPieces.postLogoutRedirectUri,
-        },
-        cache: { cacheLocation: 'localStorage' },
-      };
-
-      // Debug aid in the console:
-      window.__lastMsalCfg = {
-        authority: config.auth.authority,
-        metadataUrl: cfgPieces.metadataUrl,
-        knownAuthorities: config.auth.knownAuthorities ?? [],
-        clientIdPresent: Boolean(config.auth.clientId),
-        hasAuthorityMetadata: Boolean(authorityMetadata),
-        account: null,
-      };
-
-      const instance = new PublicClientApplication(config);
-      await instance.initialize();
-
-      try {
-        const result = await instance.handleRedirectPromise();
-        if (result?.account) setAccount(result.account);
-      } catch {
-        // ignore
-      }
-
-      const accs = instance.getAllAccounts();
-      if (accs.length > 0) setAccount(accs[0]);
-
-      window.msalInstance = instance;
-      const last = window.__lastMsalCfg;
-      if (last) {
-        last.account = accs[0]
-          ? { username: accs[0].username, homeAccountId: accs[0].homeAccountId }
-          : null;
-      }
-
-      setMsal(instance);
+    const msalConfig: Configuration = {
+      auth: {
+        clientId: env.NEXT_PUBLIC_CIAM_CLIENT_ID,
+        authority: env.NEXT_PUBLIC_CIAM_AUTHORITY,
+        redirectUri: env.NEXT_PUBLIC_REDIRECT_URI,
+        postLogoutRedirectUri: env.NEXT_PUBLIC_POST_LOGOUT_REDIRECT_URI,
+      },
+      cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false },
     };
 
-    void init();
-  }, [cfgPieces]);
+    const instance = new PublicClientApplication(msalConfig);
+    (window as any).msalInstance = instance;
 
-  const login = async () => {
-    if (!msal) return;
-    const req: RedirectRequest = {
-      // Minimal scope for interactive sign-in; API scopes can be requested later.
-      scopes: ['openid'],
-      redirectUri: cfgPieces.redirectUri,
-    };
-    await msal.loginRedirect(req);
-  };
-
-  const logout = async () => {
-    if (!msal) return;
-    await msal.logoutRedirect({
-      postLogoutRedirectUri: cfgPieces.postLogoutRedirectUri,
+    instance.handleRedirectPromise().then(result => {
+      if (result?.account) {
+        instance.setActiveAccount(result.account);
+        setAccount(result.account);
+      } else {
+        const current = instance.getAllAccounts()[0];
+        if (current) {
+          instance.setActiveAccount(current);
+          setAccount(current);
+        }
+      }
     });
-    setAccount(null);
-  };
+  }, [env]);
+
+  const login = () => window.msalInstance?.loginRedirect({ scopes: [] });
+  const logout = () => window.msalInstance?.logoutRedirect();
 
   return (
-    <AuthContext.Provider value={{ msal, account, login, logout }}>
+    <AuthContext.Provider value={{ account, login, logout }}>
       {children}
     </AuthContext.Provider>
   );
-}
-
-export function useAuth() {
-  return useContext(AuthContext);
 }
