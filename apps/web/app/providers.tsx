@@ -123,7 +123,8 @@ export default function Providers({ children }: { children: React.ReactNode }) {
           // eslint-disable-next-line no-console
           console.warn('MSAL login blocked: invalid config', {
             clientIdPresent: Boolean(CLIENT_ID),
-            authority,
+            authority: AUTHORITY,
+            metadataUrl: METADATA_URL,AUTHORITY,
           });
           setReady(true); // render UI, but login will be blocked
           return;
