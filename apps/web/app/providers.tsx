@@ -1,3 +1,4 @@
+// apps/web/app/providers.tsx
 'use client';
 
 import React, {
@@ -7,211 +8,171 @@ import React, {
   useMemo,
   useState,
   type ReactNode,
-  type ReactElement,
 } from 'react';
 import {
   PublicClientApplication,
-  LogLevel,
-  type AccountInfo,
   type Configuration,
-  type RedirectRequest,
+  type AccountInfo,
   type SilentRequest,
+  type RedirectRequest,
 } from '@azure/msal-browser';
 
-/* ============================================================================
-   Auth context
-============================================================================ */
-
-interface AuthContextValue {
-  ready: boolean;
-  msal: PublicClientApplication | null;
+type AuthContextValue = {
+  msal?: PublicClientApplication;
   account: AccountInfo | null;
+  ready: boolean;
   login: () => Promise<void>;
   logout: () => Promise<void>;
-  getToken: (scopeOverride?: string) => Promise<string>;
+  getToken: (scopes: string[]) => Promise<string>;
+};
+
+const AuthContext = createContext<AuthContextValue | null>(null);
+
+function buildAuthorityPieces(): {
+  clientId: string;
+  authority: string;
+  metadataUrl?: string;
+  knownAuthorities: string[];
+  redirectUri: string;
+} {
+  const env = (typeof window !== 'undefined' ? (window as unknown as { __env?: Record<string, string> }).__env : undefined) ?? {};
+
+  const CLIENT_ID = env.NEXT_PUBLIC_CIAM_CLIENT_ID || '';
+  const BASE_AUTHORITY = (env.NEXT_PUBLIC_CIAM_AUTHORITY || '').replace(/\/+$/, '');
+  const USER_FLOW = (env.NEXT_PUBLIC_CIAM_USER_FLOW || '').replace(/\/+$/, '');
+  const DOMAIN = (env.NEXT_PUBLIC_CIAM_DOMAIN || '').toLowerCase();
+  const TENANT_ID = (env.NEXT_PUBLIC_CIAM_TENANT_ID || '').toLowerCase();
+  const metadataUrl = env.NEXT_PUBLIC_CIAM_METADATA_URL || undefined;
+  const redirectUri = env.NEXT_PUBLIC_REDIRECT_URI || window.location.origin + '/';
+
+  // Build B2C/CIAM authority with user flow segment
+  const authority =
+    USER_FLOW && BASE_AUTHORITY
+      ? `${BASE_AUTHORITY}/${USER_FLOW}/v2.0`
+      : BASE_AUTHORITY || '';
+
+  const knownAuthorities: string[] = [];
+  if (DOMAIN) knownAuthorities.push(DOMAIN);
+  if (TENANT_ID) knownAuthorities.push(`${TENANT_ID}.ciamlogin.com`);
+
+  // Expose debug config
+  (window as unknown as {
+    __lastMsalCfg?: {
+      authority?: string;
+      metadataUrl?: string;
+      knownAuthorities?: string[];
+      clientIdPresent: boolean;
+      hasAuthorityMetadata: boolean;
+      redirectUri: string;
+    };
+  }).__lastMsalCfg = {
+    authority,
+    metadataUrl,
+    knownAuthorities,
+    clientIdPresent: Boolean(CLIENT_ID),
+    hasAuthorityMetadata: Boolean(metadataUrl),
+    redirectUri,
+  };
+
+  return { clientId: CLIENT_ID, authority, metadataUrl, knownAuthorities, redirectUri };
 }
 
-const AuthContext = createContext<AuthContextValue | undefined>(undefined);
+export default function Providers({ children }: { children: ReactNode }) {
+  const [{ msal, account, ready }, setState] = useState<{
+    msal?: PublicClientApplication;
+    account: AccountInfo | null;
+    ready: boolean;
+  }>({ msal: undefined, account: null, ready: false });
+
+  const cfg = useMemo(buildAuthorityPieces, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function init() {
+      // Guard: must have clientId and authority
+      if (!cfg.clientId || !cfg.authority) {
+        // Render UI but login won’t work—helps you see missing vars quickly
+        if (mounted) setState((s) => ({ ...s, ready: true }));
+        return;
+      }
+
+      const authCfg: Configuration['auth'] = {
+        clientId: cfg.clientId,
+        authority: cfg.authority,
+        knownAuthorities: cfg.knownAuthorities.length ? cfg.knownAuthorities : undefined,
+        redirectUri: cfg.redirectUri,
+      };
+
+      const configuration: Configuration = { auth: authCfg };
+
+      // If you provided explicit metadata URL, attach it (MSAL will trust it)
+      if (cfg.metadataUrl) {
+        (configuration as unknown as { auth: { authorityMetadata: string } }).auth.authorityMetadata =
+          JSON.stringify({ authority_metadata_url: cfg.metadataUrl });
+      }
+
+      const instance = new PublicClientApplication(configuration);
+      await instance.initialize();
+
+      // Handle the redirect hash if present
+      try {
+        await instance.handleRedirectPromise();
+      } catch {
+        // swallow; UI will still show and allow login retry
+      }
+
+      const accounts = instance.getAllAccounts();
+      const first = accounts[0] ?? null;
+
+      // Expose for quick console diagnosis
+      (window as unknown as { msalInstance?: PublicClientApplication }).msalInstance = instance;
+
+      if (!mounted) return;
+      setState({ msal: instance, account: first, ready: true });
+    }
+
+    void init();
+    return () => {
+      mounted = false;
+    };
+  }, [cfg.clientId, cfg.authority, cfg.knownAuthorities, cfg.metadataUrl, cfg.redirectUri]);
+
+  const login = async (): Promise<void> => {
+    if (!msal) return;
+    const request: RedirectRequest = {
+      // For login you can pass a minimal scope; token acquisition can request API scope later
+      scopes: ['openid'],
+      redirectUri: cfg.redirectUri,
+    };
+    await msal.acquireTokenRedirect(request);
+  };
+
+  const logout = async (): Promise<void> => {
+    if (!msal) return;
+    await msal.logoutRedirect({ postLogoutRedirectUri: cfg.redirectUri });
+  };
+
+  const getToken = async (scopes: string[]): Promise<string> => {
+    if (!msal) throw new Error('MSAL not ready');
+    const acct = account ?? msal.getAllAccounts()[0] ?? null;
+    if (!acct) {
+      // Not signed in; start login
+      await login();
+      return '';
+    }
+    const request: SilentRequest = { account: acct, scopes };
+    const result = await msal.acquireTokenSilent(request);
+    return result.accessToken;
+  };
+
+  const value: AuthContextValue = { msal, account, ready, login, logout, getToken };
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
 
 export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error('useAuth must be used within <Providers>');
   return ctx;
-}
-
-/* ============================================================================
-   Providers (MSAL bootstrap)
-============================================================================ */
-
-export default function Providers({ children }: { children: ReactNode }): ReactElement {
-  const [msalApp, setMsalApp] = useState<PublicClientApplication | null>(null);
-  const [account, setAccount] = useState<AccountInfo | null>(null);
-  const [ready, setReady] = useState(false);
-
-  // Read NEXT_PUBLIC_* at build time (Next inlines these).
-  const CLIENT_ID = process.env.NEXT_PUBLIC_CIAM_CLIENT_ID ?? '';
-  const TENANT_ID = process.env.NEXT_PUBLIC_CIAM_TENANT_ID ?? '';
-  const DOMAIN = process.env.NEXT_PUBLIC_CIAM_DOMAIN ?? '';
-  const USER_FLOW = process.env.NEXT_PUBLIC_CIAM_USER_FLOW ?? 'SignUpSignIn';
-  const REDIRECT_URI =
-    process.env.NEXT_PUBLIC_REDIRECT_URI ??
-    (typeof window !== 'undefined' ? `${window.location.origin}/` : '/');
-  const POST_LOGOUT_REDIRECT_URI =
-    process.env.NEXT_PUBLIC_POST_LOGOUT_REDIRECT_URI ?? REDIRECT_URI;
-  const API_SCOPE = process.env.NEXT_PUBLIC_API_SCOPE ?? '';
-
-  // CIAM/B2C authority format: https://{domain}/{tenantId}/{policy}/v2.0
-  const AUTHORITY =
-    DOMAIN && TENANT_ID ? `https://${DOMAIN}/${TENANT_ID}/${USER_FLOW}/v2.0` : undefined;
-
-  // For B2C/CIAM you MUST set knownAuthorities to your CIAM/B2C domain
-  const KNOWN_AUTHORITIES = DOMAIN ? [DOMAIN] : [];
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function boot() {
-      try {
-        // If critical pieces are missing, surface debug info and don’t crash
-        if (!CLIENT_ID || !AUTHORITY) {
-          if (typeof window !== 'undefined') {
-            (window as unknown as Record<string, unknown>).__lastMsalCfg = {
-              clientIdPresent: Boolean(CLIENT_ID),
-              authority: AUTHORITY,
-              knownAuthorities: KNOWN_AUTHORITIES,
-              redirectUri: REDIRECT_URI,
-              hasAuthorityMetadata: false,
-              account: null,
-            };
-          }
-          setReady(true);
-          return;
-        }
-
-        const cfg: Configuration = {
-          auth: {
-            clientId: CLIENT_ID,
-            authority: AUTHORITY,
-            knownAuthorities: KNOWN_AUTHORITIES,
-            redirectUri: REDIRECT_URI,
-            postLogoutRedirectUri: POST_LOGOUT_REDIRECT_URI,
-            // IMPORTANT: do NOT set "authorityMetadata" to a URL.
-            // MSAL expects JSON content there, not a URL. Using a URL causes endpoint errors.
-          },
-          system: {
-            loggerOptions: {
-              logLevel: LogLevel.Error,
-              loggerCallback: () => {
-                /* no-op */
-              },
-            },
-          },
-          cache: {
-            cacheLocation: 'sessionStorage',
-            storeAuthStateInCookie: false,
-          },
-        };
-
-        const app = new PublicClientApplication(cfg);
-
-        // MSAL v3 requires initialize(); v2 does not have it. Guard safely without "any".
-        const maybeInit =
-          (app as unknown as Record<string, unknown>)['initialize'];
-        if (typeof maybeInit === 'function') {
-          await (maybeInit as () => Promise<void>)();
-        }
-
-        // Handle the redirect response (if any) and pick an account
-        const result = await app.handleRedirectPromise();
-        const active = (result?.account ?? app.getAllAccounts()[0]) || null;
-        if (active) app.setActiveAccount(active);
-
-        if (!cancelled) {
-          setMsalApp(app);
-          setAccount(active);
-          setReady(true);
-
-          if (typeof window !== 'undefined') {
-            (window as unknown as Record<string, unknown>).msalInstance = app;
-            (window as unknown as Record<string, unknown>).__lastMsalCfg = {
-              authority: AUTHORITY,
-              knownAuthorities: KNOWN_AUTHORITIES,
-              clientIdPresent: Boolean(CLIENT_ID),
-              hasAuthorityMetadata: false,
-              account: active
-                ? {
-                    homeAccountId: active.homeAccountId,
-                    username: active.username,
-                  }
-                : null,
-              redirectUri: REDIRECT_URI,
-            };
-          }
-        }
-      } catch {
-        // Don’t trap the app in “initializing” state on errors
-        if (!cancelled) setReady(true);
-      }
-    }
-
-    boot();
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    CLIENT_ID,
-    AUTHORITY,
-    KNOWN_AUTHORITIES,
-    REDIRECT_URI,
-    POST_LOGOUT_REDIRECT_URI,
-  ]);
-
-  const login = useMemo(() => {
-    return async (): Promise<void> => {
-      if (!msalApp) return;
-      const req: RedirectRequest = {
-        // Use OIDC scopes for login, acquire API token later.
-        scopes: ['openid', 'profile', 'offline_access'],
-        redirectUri: REDIRECT_URI,
-      };
-      await msalApp.loginRedirect(req);
-    };
-  }, [msalApp, REDIRECT_URI]);
-
-  const logout = useMemo(() => {
-    return async (): Promise<void> => {
-      if (!msalApp) return;
-      await msalApp.logoutRedirect({ postLogoutRedirectUri: POST_LOGOUT_REDIRECT_URI });
-    };
-  }, [msalApp, POST_LOGOUT_REDIRECT_URI]);
-
-  const getToken = useMemo(() => {
-    return async (scopeOverride?: string): Promise<string> => {
-      if (!msalApp) throw new Error('MSAL not ready');
-      const scopes = [scopeOverride ?? API_SCOPE].filter((s) => s && s.length) as string[];
-      if (!scopes.length) throw new Error('Missing API scope');
-
-      const acc =
-        msalApp.getActiveAccount() ?? msalApp.getAllAccounts()[0] ?? undefined;
-      if (!acc) throw new Error('No signed-in account');
-
-      const req: SilentRequest = { account: acc, scopes };
-      const res = await msalApp.acquireTokenSilent(req);
-      return res.accessToken;
-    };
-  }, [msalApp, API_SCOPE]);
-
-  const value = useMemo<AuthContextValue>(
-    () => ({
-      ready,
-      msal: msalApp,
-      account,
-      login,
-      logout,
-      getToken,
-    }),
-    [ready, msalApp, account, login, logout, getToken]
-  );
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
