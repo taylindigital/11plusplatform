@@ -79,8 +79,7 @@ export async function ensureMsalReady(): Promise<PublicClientApplication> {
           if (existing) msal.setActiveAccount(existing);
         }
       } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error('MSAL redirect error', err);
+          console.error('MSAL redirect error', err);
       }
     })();
   }
