@@ -3,7 +3,7 @@
 import React from 'react';
 import { useAuth } from '@/app/providers';
 
-export default function AuthButtons(): JSX.Element {
+export default function AuthButtons(): React.ReactElement {
   const { ready, account, login, logout } = useAuth();
 
   if (!ready) {
