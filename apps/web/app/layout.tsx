@@ -1,10 +1,11 @@
 // apps/web/app/layout.tsx
-import './globals.css';
 import type { Metadata } from 'next';
+import './globals.css';
+import Providers from './providers';
 
 export const metadata: Metadata = {
   title: '11+ Platform',
-  description: 'Login',
+  description: 'Admin & user portal',
 };
 
 // Helper to JSON.stringify with empty-string fallback
@@ -17,6 +18,14 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
+  return (
+    <html lang="en">
+      <body>
+        <Providers>{children}</Providers>
+      </body>
+    </html>
+  );
+}
   // NOTE: These values are read at build time from process.env.*.
   // In SWA, you’ve defined them in the portal; Next bakes them in here.
   const envScript = `
