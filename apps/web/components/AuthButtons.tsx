@@ -1,34 +1,37 @@
+// apps/web/components/AuthButtons.tsx
 'use client';
 
 import React from 'react';
 import { useAuth } from '@/app/providers';
 
-export default function AuthButtons(): React.ReactElement {
+export default function AuthButtons() {
   const { ready, account, login, logout } = useAuth();
-
-  if (!ready) {
-    return <div className="text-sm text-gray-600">Initializing authentication…</div>;
-  }
 
   return (
     <div className="flex items-center gap-3">
-      {account ? (
+      {!ready && <span>Initializing sign-in…</span>}
+
+      {ready && !account && (
+        <button
+          type="button"
+          className="px-4 py-2 rounded bg-emerald-600 text-white"
+          onClick={() => void login()}
+        >
+          Sign in
+        </button>
+      )}
+
+      {ready && account && (
         <>
-          <span className="text-sm">Signed in as <strong>{account.username}</strong></span>
+          <span className="text-sm">Signed in as {account.username || account.homeAccountId}</span>
           <button
-            className="px-3 py-2 rounded bg-gray-200 hover:bg-gray-300"
+            type="button"
+            className="px-3 py-2 rounded border"
             onClick={() => void logout()}
           >
             Sign out
           </button>
         </>
-      ) : (
-        <button
-          className="px-3 py-2 rounded bg-emerald-600 text-white hover:bg-emerald-700"
-          onClick={() => void login()}
-        >
-          Sign in
-        </button>
       )}
     </div>
   );
